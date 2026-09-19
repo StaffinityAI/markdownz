@@ -117,9 +117,10 @@ pub const Renderer = struct {
                 .code_block => |block| {
                     if (!block.closed) {
                         const tl = self.getTextLayout();
-                        tl.format("```{s}", .{block.language}, .{});
+                        tl.format("```{s}\n", .{block.language}, .{});
                         for (block.lines.items) |line| {
                             tl.addText(line, .{});
+                            tl.addText("\n", .{});
                         }
                         continue;
                     }
