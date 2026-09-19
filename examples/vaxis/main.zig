@@ -34,6 +34,8 @@ const TableBlock = struct {
     row_count: usize,
 };
 
+const TableBorderKind = enum { top, middle, bottom };
+
 const LineKind = union(enum) {
     normal,
     heading: u8,
@@ -485,9 +487,26 @@ fn drawDocument(viewport: vaxis.Window, lines: []const Line, scroll: usize) void
         const line_end = document_row + height;
         if (line_end > scroll and document_row < scroll + viewport.height) {
             const visible_start = scroll -| document_row;
-            const screen_row: i17 = @intCast(document_row -| scroll);
+            const screen_row: u16 = @intCast(document_row -| scroll);
+            const visible_height: u16 = @intCast(@min(height - visible_start, viewport.height - screen_row));
+            if (line.kind == .table) {
+                const line_window = viewport.child(.{
+                    .y_off = @intCast(screen_row),
+                    .height = visible_height,
+                });
+                drawTable(line_window, line.kind.table, visible_start);
+                document_row = line_end;
+                if (document_row >= scroll + viewport.height) break;
+                continue;
+            }
+
+            if (visible_start > std.math.maxInt(i17)) {
+                document_row = line_end;
+                if (document_row >= scroll + viewport.height) break;
+                continue;
+            }
             const line_window = viewport.child(.{
-                .y_off = screen_row - @as(i17, @intCast(visible_start)),
+                .y_off = @as(i17, @intCast(screen_row)) - @as(i17, @intCast(visible_start)),
                 .height = @intCast(@min(height, std.math.maxInt(u16))),
             });
 
@@ -512,7 +531,7 @@ fn drawDocument(viewport: vaxis.Window, lines: []const Line, scroll: usize) void
                         drawImageFallback(line_window, line.segments);
                     }
                 },
-                .table => |table| drawTable(line_window, table),
+                .table => unreachable,
                 .normal => _ = line_window.print(line.segments, .{ .wrap = .word }),
             }
         }
@@ -546,24 +565,62 @@ fn tableColumnWidths(total_width: u16, columns: usize) TableWidths {
     };
 }
 
-fn drawTable(win: vaxis.Window, table: TableBlock) void {
+fn drawTable(win: vaxis.Window, table: TableBlock, visible_start: usize) void {
     if (table.columns.len == 0 or win.width < table.columns.len * 4 + 1) {
         _ = win.printSegment(.{ .text = "[table too wide for terminal]", .style = .{ .dim = true } }, .{ .wrap = .none });
         return;
     }
 
     const widths = tableColumnWidths(win.width, table.columns.len);
-    var row: u16 = 0;
-    drawTableBorder(win, row, widths, .top);
-    row += 1;
-    row += drawTableRow(win, row, table, widths, null, true);
-    drawTableBorder(win, row, widths, .middle);
-    row += 1;
+    var document_row: usize = 0;
+    drawVisibleTableBorder(win, document_row, visible_start, widths, .top);
+    document_row += 1;
+    const header_height = tableRowHeight(win, table, widths, null);
+    drawVisibleTableRow(win, document_row, visible_start, table, widths, null, true, header_height);
+    document_row += header_height;
+    drawVisibleTableBorder(win, document_row, visible_start, widths, if (table.row_count == 0) .bottom else .middle);
+    document_row += 1;
     for (0..table.row_count) |row_index| {
-        row += drawTableRow(win, row, table, widths, row_index, false);
-        drawTableBorder(win, row, widths, if (row_index + 1 == table.row_count) .bottom else .middle);
-        row += 1;
+        const height = tableRowHeight(win, table, widths, row_index);
+        drawVisibleTableRow(win, document_row, visible_start, table, widths, row_index, false, height);
+        document_row += height;
+        drawVisibleTableBorder(win, document_row, visible_start, widths, if (row_index + 1 == table.row_count) .bottom else .middle);
+        document_row += 1;
+        if (document_row >= visible_start + win.height) break;
     }
+}
+
+fn drawVisibleTableBorder(
+    win: vaxis.Window,
+    document_row: usize,
+    visible_start: usize,
+    widths: TableWidths,
+    kind: TableBorderKind,
+) void {
+    if (document_row < visible_start or document_row >= visible_start + win.height) return;
+    drawTableBorder(win, @intCast(document_row - visible_start), widths, kind);
+}
+
+fn drawVisibleTableRow(
+    win: vaxis.Window,
+    document_row: usize,
+    visible_start: usize,
+    table: TableBlock,
+    widths: TableWidths,
+    row_index: ?usize,
+    header: bool,
+    height: usize,
+) void {
+    const row_end = document_row + height;
+    if (row_end <= visible_start or document_row >= visible_start + win.height) return;
+    const skipped = visible_start -| document_row;
+    if (skipped > std.math.maxInt(i17)) return;
+    const screen_row = document_row -| visible_start;
+    const row_window = win.child(.{
+        .y_off = @as(i17, @intCast(screen_row)) - @as(i17, @intCast(skipped)),
+        .height = @intCast(@min(height, std.math.maxInt(u16))),
+    });
+    _ = drawTableRow(row_window, 0, table, widths, row_index, header);
 }
 
 fn drawTableRow(
@@ -631,7 +688,7 @@ fn tableTextOffset(
     };
 }
 
-fn drawTableBorder(win: vaxis.Window, row: u16, widths: TableWidths, kind: enum { top, middle, bottom }) void {
+fn drawTableBorder(win: vaxis.Window, row: u16, widths: TableWidths, kind: TableBorderKind) void {
     if (row >= win.height) return;
     const left: []const u8, const join: []const u8, const right: []const u8 = switch (kind) {
         .top => .{ "┌", "┬", "┐" },
