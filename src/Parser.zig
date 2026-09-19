@@ -84,9 +84,11 @@ pub const Node = union(enum) {
     };
 
     pub const Column = struct {
-        alignment: enum { left, right, center },
+        alignment: Alignment,
         header: []Section,
         values: [][]Section,
+
+        pub const Alignment = enum { left, right, center };
     };
 };
 
@@ -357,15 +359,137 @@ test "short marker-like lines do not panic" {
     try std.testing.expect(nodes.len > 0);
 }
 
-test "unimplemented block concepts remain available as text" {
+test "tables parse headers alignments and body rows" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const nodes = try parse(arena.allocator(), "| table | row |\n[^note]: footnote\n<em>html</em>\n", .{});
-    try std.testing.expectEqual(@as(usize, 3), nodes.len);
-    try expectTextContent(nodes[0], "| table | row |");
-    try std.testing.expect(nodes[1].* == .text);
-    try expectTextContent(nodes[2], "<em>html</em>");
+    const nodes = try parse(arena.allocator(),
+        \\| Name | Description | Count |
+        \\| :--- | :---------: | ----: |
+        \\| alpha | first | 1 |
+        \\| beta | second | 2 |
+    , .{});
+
+    try std.testing.expectEqual(@as(usize, 1), nodes.len);
+    try std.testing.expect(nodes[0].* == .table);
+    const columns = nodes[0].table;
+    try std.testing.expectEqual(@as(usize, 3), columns.len);
+    try std.testing.expectEqual(.left, columns[0].alignment);
+    try std.testing.expectEqual(.center, columns[1].alignment);
+    try std.testing.expectEqual(.right, columns[2].alignment);
+    try expectDefaultSection(columns[0].header, "Name");
+    try expectDefaultSection(columns[1].header, "Description");
+    try expectDefaultSection(columns[2].header, "Count");
+    try std.testing.expectEqual(@as(usize, 2), columns[0].values.len);
+    try expectDefaultSection(columns[0].values[0], "alpha");
+    try expectDefaultSection(columns[1].values[1], "second");
+    try expectDefaultSection(columns[2].values[1], "2");
+}
+
+test "tables allow omitted outer pipes and inline formatting" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(),
+        \\Feature | Status
+        \\--- | ---
+        \\**bold** | `ready`
+    , .{});
+
+    const columns = nodes[0].table;
+    try std.testing.expectEqual(@as(usize, 2), columns.len);
+    try std.testing.expect(columns[0].values[0][0] == .bold);
+    try std.testing.expect(columns[1].values[0][0] == .code);
+}
+
+test "table rows pad missing cells and ignore extra cells" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(),
+        \\A | B
+        \\--- | ---
+        \\| one |
+        \\two | value | ignored
+    , .{});
+
+    const columns = nodes[0].table;
+    try std.testing.expectEqual(@as(usize, 2), columns[0].values.len);
+    try expectDefaultSection(columns[0].values[0], "one");
+    try std.testing.expectEqual(@as(usize, 0), columns[1].values[0].len);
+    try expectDefaultSection(columns[1].values[1], "value");
+}
+
+test "a non-table line ends table body parsing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "A | B\n--- | ---\none | two\nafter table\n", .{});
+    try std.testing.expectEqual(@as(usize, 2), nodes.len);
+    try std.testing.expect(nodes[0].* == .table);
+    try expectDefaultText(nodes[1], "after table");
+}
+
+test "escaped and code-span pipes do not split table cells" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(),
+        \\Expression | Meaning
+        \\--- | ---
+        \\left \| right | `a|b`
+    , .{});
+
+    const columns = nodes[0].table;
+    try std.testing.expectEqual(@as(usize, 2), columns.len);
+    try expectTextContentSections(columns[0].values[0], "left \\| right");
+    try std.testing.expectEqual(@as(usize, 1), columns[1].values[0].len);
+    try std.testing.expect(columns[1].values[0][0] == .code);
+    try std.testing.expectEqualStrings("a|b", columns[1].values[0][0].code);
+}
+
+test "blank lines terminate table body parsing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "A | B\n--- | ---\none | two\n\nlater | text\n", .{});
+    try std.testing.expectEqual(@as(usize, 2), nodes.len);
+    try std.testing.expectEqual(@as(usize, 1), nodes[0].table[0].values.len);
+    try expectTextContent(nodes[1], "later | text");
+}
+
+test "invalid table delimiters remain text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const too_short = try parse(arena.allocator(), "A | B\n-- | ---\n", .{});
+    try std.testing.expectEqual(@as(usize, 2), too_short.len);
+    try expectTextContent(too_short[0], "A | B");
+    try expectTextContent(too_short[1], "-- | ---");
+
+    const wrong_count = try parse(arena.allocator(), "A | B\n--- | --- | ---\n", .{});
+    try std.testing.expectEqual(@as(usize, 2), wrong_count.len);
+    try expectTextContent(wrong_count[0], "A | B");
+    try expectTextContent(wrong_count[1], "--- | --- | ---");
+}
+
+test "pipe text without a delimiter row is not a table" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "left | right\nordinary text\n", .{});
+    try std.testing.expectEqual(@as(usize, 2), nodes.len);
+    try expectTextContent(nodes[0], "left | right");
+}
+
+test "other unimplemented block concepts remain available as text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "[^note]: footnote\n<em>html</em>\n", .{});
+    try std.testing.expectEqual(@as(usize, 2), nodes.len);
+    try std.testing.expect(nodes[0].* == .text);
+    try expectTextContent(nodes[1], "<em>html</em>");
 }
 
 fn expectDefaultText(node: *Node, expected: []const u8) !void {
@@ -381,8 +505,12 @@ fn expectDefaultSection(sections: []Node.Section, expected: []const u8) !void {
 
 fn expectTextContent(node: *Node, expected: []const u8) !void {
     try std.testing.expect(node.* == .text);
+    try expectTextContentSections(node.text, expected);
+}
+
+fn expectTextContentSections(sections: []Node.Section, expected: []const u8) !void {
     var offset: usize = 0;
-    for (node.text) |section| {
+    for (sections) |section| {
         try std.testing.expect(section == .default);
         const text = section.default;
         try std.testing.expect(offset + text.len <= expected.len);
@@ -445,6 +573,7 @@ const Context = struct {
     graph: std.ArrayList(*Node) = .empty,
     previous_node: ?*Node = null,
     previous_heading: ?*Node = null,
+    previous_line: ?[]const u8 = null,
 
     fn skipBlank(line: []const u8) usize {
         var i: usize = 0;
@@ -599,6 +728,97 @@ const Context = struct {
         };
 
         try ctx.appendNode(arena, node);
+    }
+
+    fn convertPreviousTextToTable(ctx: *Context, arena: std.mem.Allocator, delimiter_line: []const u8, options: Options) !bool {
+        const previous_node = ctx.previous_node orelse return false;
+        if (previous_node.* != .text) return false;
+        const header_line = ctx.previous_line orelse return false;
+        if (!containsTablePipe(header_line)) return false;
+
+        const headers = try splitTableRow(arena, header_line);
+        const delimiters = try splitTableRow(arena, delimiter_line);
+        if (headers.len == 0 or delimiters.len != headers.len) return false;
+
+        const columns = try arena.alloc(Node.Column, headers.len);
+        for (columns, headers, delimiters) |*column, header, delimiter| {
+            column.* = .{
+                .alignment = parseTableAlignment(delimiter) orelse return false,
+                .header = try parseLineText(arena, header, options),
+                .values = &.{},
+            };
+        }
+
+        previous_node.* = .{ .table = columns };
+        return true;
+    }
+
+    fn appendTableRow(arena: std.mem.Allocator, columns: []Node.Column, line: []const u8, options: Options) !void {
+        const cells = try splitTableRow(arena, line);
+        for (columns, 0..) |*column, index| {
+            const value = if (index < cells.len) try parseLineText(arena, cells[index], options) else try arena.alloc(Node.Section, 0);
+            const values = try arena.alloc([]Node.Section, column.values.len + 1);
+            @memcpy(values[0..column.values.len], column.values);
+            values[column.values.len] = value;
+            column.values = values;
+        }
+    }
+
+    fn containsTablePipe(line: []const u8) bool {
+        var escaped = false;
+        var code = false;
+        for (line) |byte| {
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (byte == '\\') {
+                escaped = true;
+            } else if (byte == '`') {
+                code = !code;
+            } else if (byte == '|' and !code) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn splitTableRow(arena: std.mem.Allocator, line: []const u8) ![][]const u8 {
+        var cells: std.ArrayList([]const u8) = .empty;
+        const trimmed = std.mem.trim(u8, line, " \t");
+        const start: usize = @intFromBool(trimmed.len > 0 and trimmed[0] == '|');
+        const end = trimmed.len - @intFromBool(trimmed.len > start and trimmed[trimmed.len - 1] == '|');
+
+        var cell_start = start;
+        var escaped = false;
+        var code = false;
+        var index = start;
+        while (index < end) : (index += 1) {
+            const byte = trimmed[index];
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (byte == '\\') {
+                escaped = true;
+            } else if (byte == '`') {
+                code = !code;
+            } else if (byte == '|' and !code) {
+                try cells.append(arena, std.mem.trim(u8, trimmed[cell_start..index], " \t"));
+                cell_start = index + 1;
+            }
+        }
+        try cells.append(arena, std.mem.trim(u8, trimmed[cell_start..end], " \t"));
+        return cells.toOwnedSlice(arena);
+    }
+
+    fn parseTableAlignment(cell: []const u8) ?Node.Column.Alignment {
+        if (cell.len < 3) return null;
+        const left = cell[0] == ':';
+        const right = cell[cell.len - 1] == ':';
+        const dashes = cell[@intFromBool(left) .. cell.len - @intFromBool(right)];
+        if (dashes.len < 3 or !std.mem.allEqual(u8, dashes, '-')) return null;
+        return if (left and right) .center else if (right) .right else .left;
     }
 
     fn appendTextNode(ctx: *Context, arena: std.mem.Allocator, line: []const u8, options: Options) !void {
@@ -928,6 +1148,10 @@ const Context = struct {
     // TODO: This should use a Reader instead
     fn parseLine(ctx: *Context, arena: std.mem.Allocator, raw_line: []const u8, options: Options) std.mem.Allocator.Error!void {
         if (raw_line.len == 0) {
+            ctx.previous_line = null;
+            if (ctx.previous_node) |node| {
+                if (node.* == .table) ctx.previous_node = null;
+            }
             if (ctx.previous_heading) |heading| {
                 if (ctx.previous_node) |node| {
                     switch (node.*) {
@@ -947,6 +1171,7 @@ const Context = struct {
 
         const line = if (raw_line[raw_line.len - 1] == '\r') raw_line[0 .. raw_line.len - 1] else raw_line;
         if (line.len == 0) return;
+        defer ctx.previous_line = line;
 
         // TODO: Completely rework `previous_node`
         if (ctx.previous_node) |node| {
@@ -979,6 +1204,14 @@ const Context = struct {
 
         const skipped = skipBlank(line);
         const skipped_line = line[skipped..];
+
+        if (ctx.previous_node) |previous_node| {
+            if (previous_node.* == .table and containsTablePipe(skipped_line)) {
+                return appendTableRow(arena, previous_node.table, skipped_line, options);
+            }
+        }
+
+        if (try ctx.convertPreviousTextToTable(arena, skipped_line, options)) return;
 
         switch (line[skipped]) {
             '#' => {
