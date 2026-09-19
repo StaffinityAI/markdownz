@@ -1,18 +1,18 @@
 # markdownz
 
-`markdownz` is a Markdown parser written in Zig. The core package has no UI dependency and exposes a parser module named `markdown`. Optional DVUI and Vaxis applications demonstrate graphical and terminal rendering.
+`markdownz` is a Markdown parser for Zig 0.16.0+. It provides:
 
-The package requires Zig 0.16.0 or newer and is licensed under the MIT License.
+- `markdown`: dependency-free parser and AST
+- `markdown-html`: optional HTML renderer
+- Optional DVUI, Vaxis, and http.zig examples
 
 ## Installation
-
-Add the package to your project:
 
 ```sh
 zig fetch --save git+https://github.com/StaffinityAI/markdownz
 ```
 
-Import the parser module from your `build.zig`:
+Add the modules you need in `build.zig`:
 
 ```zig
 const markdown_dep = b.dependency("markdown", .{
@@ -20,56 +20,30 @@ const markdown_dep = b.dependency("markdown", .{
     .optimize = optimize,
 });
 
-const app = b.addExecutable(.{
-    .name = "example",
-    .root_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "markdown", .module = markdown_dep.module("markdown") },
-        },
-    }),
-});
+const imports: []const std.Build.Module.Import = &.{
+    .{ .name = "markdown", .module = markdown_dep.module("markdown") },
+    .{ .name = "markdown-html", .module = markdown_dep.module("markdown-html") },
+};
 ```
 
-## Parsing
+Import only `markdown` if HTML rendering is not needed. The separate renderer module adds no code to parser-only consumers.
 
-`parse` returns a tree of `markdown.Node` values allocated from the supplied allocator:
+## Parsing
 
 ```zig
 const std = @import("std");
 const markdown = @import("markdown");
 
-pub fn main(init: std.process.Init) !void {
-    var arena = std.heap.ArenaAllocator.init(init.gpa);
-    defer arena.deinit();
+var arena = std.heap.ArenaAllocator.init(allocator);
+defer arena.deinit();
 
-    const source =
-        \\A paragraph with **bold text**.
-        \\# Example
-    ;
-
-    const nodes = try markdown.parse(arena.allocator(), source, .{});
-    for (nodes) |node| {
-        switch (node.*) {
-            .heading => |heading| std.debug.print("heading level {d}\n", .{heading.level}),
-            .text => std.debug.print("text line\n", .{}),
-            else => {},
-        }
-    }
-}
+const source = "# Hello\nMarkdown with **bold text**.";
+const nodes = try markdown.parse(arena.allocator(), source, .{});
 ```
 
-### Ownership
+The returned AST and its slices remain valid while both the supplied allocator and source buffer are alive. An arena allocator is recommended for complete documents.
 
-- All nodes, sections, lists, table values, and parser-owned slices are allocated from the allocator passed to `markdown.parse`.
-- Keep that allocator alive while reading the returned graph.
-- The graph contains slices into the original Markdown buffer. Keep the input buffer alive for at least as long as the graph.
-- An arena allocator is recommended when parsing a complete document. Deinitializing or resetting the arena releases the graph as one generation.
-- Content following a heading is attached to that heading's `children` until a same-level or higher-level heading is parsed.
-
-## Parser Options
+Parser options:
 
 ```zig
 const options: markdown.Options = .{
@@ -78,120 +52,61 @@ const options: markdown.Options = .{
 };
 ```
 
-| Option | Default | Behavior |
-| --- | --- | --- |
-| `mode` | `.loose` | `.loose` trims accepted padding in constructs such as link and image destinations. `.strict` rejects those padded forms. |
-| `underline_extension` | `false` | Parses `__text__` as underline instead of bold. |
-| `parse_arbitrary_urls` | `false` | Reserved for automatic URL parsing; not implemented. |
-| `typographic_replacement` | `false` | Reserved for typographic substitutions; not implemented. |
+## HTML Rendering
+
+Render a complete document into an allocated buffer:
+
+```zig
+const html = @import("markdown-html");
+
+const document = try html.renderAlloc(allocator, nodes, .{
+    .title = "Example",
+});
+defer allocator.free(document);
+```
+
+Use `html.render(writer, nodes, options)` to stream directly to an `std.Io.Writer`. Set `.document = false` for an HTML fragment. Content and attributes are HTML-escaped.
 
 ## Supported Syntax
 
-The parser currently supports:
+- ATX and Setext headings, including custom IDs
+- Paragraphs, horizontal rules, and fenced code blocks
+- Block quotes and nested ordered, unordered, and task lists
+- Bold, italic, bold-italic, underline, strikethrough, highlight, and inline code
+- Links, images, hover text, and emoji shortcodes
+- Tables with column alignment
+- LF and CRLF input
 
-- ATX headings from level 1 through 6, including custom IDs
-- Setext headings
-- Line-oriented text nodes and blank-line separation
-- Horizontal rules
-- Fenced code blocks with optional language text
-- Block quotes
-- Ordered, unordered, task, and indented nested lists
-- Bold, italic, bold-italic, strikethrough, highlight, and inline code
-- Optional underline syntax
-- Links and images with optional hover text
-- Emoji shortcode sections such as `:sparkles:`
-- Tables with column alignment, missing-cell padding, escaped pipes, and pipes inside code spans
-- LF and CRLF documents
-
-The public node model also reserves variants for footnotes, alerts, containers, subscript, superscript, and typographic text. Those constructs are not currently parsed as dedicated nodes. Automatic URLs, HTML, entities, and general Markdown backslash escapes are also not implemented. Table parsing does recognize escaped pipes so they remain inside a cell.
-
-Text scanning currently assumes ASCII for Markdown marker detection. UTF-8 text can be preserved in content, but full Unicode-aware parsing is not yet implemented.
-
-Quote and list nesting is capped at 128 levels so example renderers cannot exhaust the call stack on hostile input.
-
-## Tables
-
-A table is represented as a slice of `markdown.Node.Column`. Each column contains:
-
-- `alignment`: `.left`, `.center`, or `.right`
-- `header`: parsed inline sections for the header cell
-- `values`: one parsed section slice per body row
-
-Rows with missing cells receive empty values. Cells beyond the declared header columns are ignored.
+Automatic URLs, raw HTML, entities, and general backslash escapes are not implemented. Markdown marker detection is currently ASCII-oriented, while UTF-8 content is preserved.
 
 ## Examples
 
-Run the graphical DVUI viewer with the built-in concept gallery:
+Run the DVUI graphical viewer:
 
 ```sh
 zig build run-gui -Ddvui=true
 ```
 
-Run it with another Markdown file:
-
-```sh
-zig build run-gui -Ddvui=true -- path/to/document.md
-```
-
 Run the Vaxis terminal viewer:
 
 ```sh
-zig build run-tui -Dvaxis=true -- path/to/document.md
+zig build run-tui -Dvaxis=true
 ```
 
-Build the viewers without running them:
+Run the http.zig web example, then open `http://localhost:8801/`:
 
 ```sh
-zig build dvui-viewer -Ddvui=true
-zig build vaxis-viewer -Dvaxis=true
+zig build run-web -Dhttp=true
 ```
 
-DVUI and Vaxis are optional dependencies. Parser-only consumers do not request either dependency. Enable them explicitly with `-Ddvui=true` or `-Dvaxis=true`; DVUI also provides the legacy `lib` compatibility module.
+DVUI, Vaxis, and http.zig are lazy dependencies and are fetched only when their option is enabled. The DVUI and Vaxis viewers also accept a Markdown file after `--`.
 
 ## Testing
 
-Run the native parser and concept-fixture tests:
-
 ```sh
 zig build test
-```
-
-Run the safety-optimized test suite:
-
-```sh
 zig build test -Doptimize=ReleaseSafe
-```
-
-Compile parser tests for another target without attempting to execute foreign binaries:
-
-```sh
 zig build test-compile -Dtarget=x86_64-linux-gnu
 ```
 
-Run optional renderer tests with:
-
-```sh
-zig build test -Ddvui=true -Dvaxis=true
-```
-
-## Migration From `dvui_markdown`
-
-The package is now parser-first and uses the package name `markdown`.
-
-| Previous API | Current API |
-| --- | --- |
-| `dependency.module("lib")` | `dependency.module("markdown")` |
-| `lib.Parser.parse(...)` | `markdown.parse(...)` |
-| `lib.Parser.Node` | `markdown.Node` |
-| `lib.MarkdownWidget` | Optional legacy DVUI compatibility API through `module("lib")` |
-
-The `lib` compatibility module requires the optional DVUI dependency and is retained for existing consumers. Consumers requesting it must enable the dependency option when configuring this package. New parser-only integrations should use the `markdown` module directly.
-
-```zig
-const markdown_dep = b.dependency("markdown", .{
-    .target = target,
-    .optimize = optimize,
-    .dvui = true,
-});
-const legacy = markdown_dep.module("lib");
-```
+Licensed under the MIT License.

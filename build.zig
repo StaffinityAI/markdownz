@@ -5,11 +5,20 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const enable_dvui = b.option(bool, "dvui", "Enable the DVUI compatibility module, viewer, and tests") orelse false;
     const enable_vaxis = b.option(bool, "vaxis", "Enable the Vaxis viewer and tests") orelse false;
+    const enable_http = b.option(bool, "http", "Enable the http.zig web example") orelse false;
 
     const markdown = b.addModule("markdown", .{
         .root_source_file = b.path("src/Parser.zig"),
         .target = target,
         .optimize = optimize,
+    });
+    const markdown_html = b.addModule("markdown-html", .{
+        .root_source_file = b.path("src/HtmlRenderer.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "markdown", .module = markdown },
+        },
     });
     const default_document = b.createModule(.{
         .root_source_file = b.path("examples/default_document.zig"),
@@ -33,17 +42,25 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    const html_tests = b.addTest(.{
+        .name = "markdown-html-tests",
+        .root_module = markdown_html,
+    });
     const test_step = b.step("test", "Run parser tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
     test_step.dependOn(&b.addRunArtifact(fixture_tests).step);
+    test_step.dependOn(&b.addRunArtifact(html_tests).step);
     const test_compile_step = b.step("test-compile", "Compile parser tests for the selected target");
     test_compile_step.dependOn(&tests.step);
     test_compile_step.dependOn(&fixture_tests.step);
+    test_compile_step.dependOn(&html_tests.step);
 
     const viewer_step = b.step("dvui-viewer", "Build the DVUI markdown viewer example");
     const run_viewer_step = b.step("run-gui", "Run the DVUI markdown viewer example");
     const vaxis_viewer_step = b.step("vaxis-viewer", "Build the Vaxis markdown viewer example");
     const run_vaxis_viewer_step = b.step("run-tui", "Run the Vaxis markdown viewer example");
+    const web_example_step = b.step("web-example", "Build the http.zig web example");
+    const run_web_example_step = b.step("run-web", "Run the http.zig web example");
 
     if (!enable_dvui) {
         const disabled = b.addFail("DVUI support is disabled; rerun with -Ddvui=true");
@@ -54,6 +71,11 @@ pub fn build(b: *std.Build) void {
         const disabled = b.addFail("Vaxis support is disabled; rerun with -Dvaxis=true");
         vaxis_viewer_step.dependOn(&disabled.step);
         run_vaxis_viewer_step.dependOn(&disabled.step);
+    }
+    if (!enable_http) {
+        const disabled = b.addFail("http.zig support is disabled; rerun with -Dhttp=true");
+        web_example_step.dependOn(&disabled.step);
+        run_web_example_step.dependOn(&disabled.step);
     }
 
     if (enable_dvui) {
@@ -153,6 +175,32 @@ pub fn build(b: *std.Build) void {
             const run_vaxis_viewer = b.addRunArtifact(vaxis_viewer);
             if (b.args) |args| run_vaxis_viewer.addArgs(args);
             run_vaxis_viewer_step.dependOn(&run_vaxis_viewer.step);
+        }
+    }
+
+    if (enable_http) {
+        if (b.lazyDependency("httpz", .{
+            .target = target,
+            .optimize = optimize,
+        })) |httpz_dep| {
+            const web_example = b.addExecutable(.{
+                .name = "markdown-web-example",
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("examples/web/main.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "markdown", .module = markdown },
+                        .{ .name = "markdown-html", .module = markdown_html },
+                        .{ .name = "default_document", .module = default_document },
+                        .{ .name = "httpz", .module = httpz_dep.module("httpz") },
+                    },
+                }),
+            });
+
+            web_example_step.dependOn(&web_example.step);
+            const run_web_example = b.addRunArtifact(web_example);
+            run_web_example_step.dependOn(&run_web_example.step);
         }
     }
 }

@@ -1,0 +1,18 @@
+ssteps
+einstall	Copy build artifacts to prefix path (default)
+euninstall	Remove build artifacts from prefix path
+etest	Run parser tests
+etest-compile	Compile parser tests for the selected target
+edvui-viewer	Build the DVUI markdown viewer example
+erun-gui	Run the DVUI markdown viewer example
+evaxis-viewer	Build the Vaxis markdown viewer example
+erun-tui	Run the Vaxis markdown viewer example
+eweb-example	Build the http.zig web example
+erun-web	Run the http.zig web example
+sproject_options
+eDoptimize	Prioritize performance, safety, or binary size
+eDdvui	Enable the DVUI compatibility module, viewer, and tests
+eDvaxis	Enable the Vaxis viewer and tests
+eDhttp	Enable the http.zig web example
+ssystem_integrations
+e(none)	
