@@ -134,7 +134,7 @@ pub const Renderer = struct {
                         _ = arr.pop();
 
                         buffer = try arr.toOwnedSlice(gpa);
-                        dvui.dataSet(null, id, "buffer", buffer.?);
+                        dvui.dataSet(null, id, "__buffer", buffer.?);
                     }
 
                     var te: dvui.TextEntryWidget = undefined;
