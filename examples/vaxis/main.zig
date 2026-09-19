@@ -13,8 +13,17 @@ const Event = union(enum) {
     winsize: vaxis.Winsize,
 };
 
+const LineKind = union(enum) {
+    normal,
+    heading: u8,
+    code,
+    rule,
+};
+
 const Line = struct {
     segments: []const vaxis.Segment,
+    gap_before: u8 = 0,
+    kind: LineKind = .normal,
 };
 
 const Document = struct {
@@ -35,29 +44,36 @@ const Renderer = struct {
             .heading => |heading| {
                 var segments: std.ArrayList(vaxis.Segment) = .empty;
                 try self.appendPrefix(&segments, quote_depth, "");
+                try segments.append(self.allocator, .{
+                    .text = headingMarker(heading.level),
+                    .style = headingStyle(heading.level),
+                });
                 try self.appendSections(&segments, heading.text, headingStyle(heading.level), null);
-                try self.addLine(&segments);
+                try self.addLine(&segments, headingGap(heading.level), .{ .heading = heading.level });
                 try self.render(heading.children.items, quote_depth);
             },
             .text => |sections| {
                 var segments: std.ArrayList(vaxis.Segment) = .empty;
                 try self.appendPrefix(&segments, quote_depth, "");
                 try self.appendSections(&segments, sections, .{}, null);
-                try self.addLine(&segments);
+                try self.addLine(&segments, 0, .normal);
             },
             .line_break => try self.addTextLine("", .{}),
-            .horizontal_rule => try self.addTextLine("────────────────────────────────────────", .{ .dim = true }),
+            .horizontal_rule => try self.addSpecialLine(.rule, 1),
             .code_block => |block| {
                 const label = if (block.language.len == 0) "code" else block.language;
                 var header: std.ArrayList(vaxis.Segment) = .empty;
                 try self.appendPrefix(&header, quote_depth, "");
+                try header.append(self.allocator, .{ .text = "  " });
                 try header.append(self.allocator, .{ .text = label, .style = .{ .bold = true, .fg = .{ .index = 6 } } });
-                try self.addLine(&header);
+                applyBackground(header.items, .{ .index = 0 });
+                try self.addLine(&header, 1, .code);
                 for (block.lines.items) |line| {
                     var segments: std.ArrayList(vaxis.Segment) = .empty;
-                    try self.appendPrefix(&segments, quote_depth, "  ");
+                    try self.appendPrefix(&segments, quote_depth, "    ");
                     try segments.append(self.allocator, .{ .text = line, .style = .{ .fg = .{ .index = 2 } } });
-                    try self.addLine(&segments);
+                    applyBackground(segments.items, .{ .index = 0 });
+                    try self.addLine(&segments, 0, .code);
                 }
             },
             .list => |list| try self.renderList(list, 0, quote_depth),
@@ -67,7 +83,7 @@ const Renderer = struct {
                 var segments: std.ArrayList(vaxis.Segment) = .empty;
                 try self.appendPrefix(&segments, quote_depth, "[^] ");
                 try self.appendSections(&segments, sections, .{ .dim = true }, null);
-                try self.addLine(&segments);
+                try self.addLine(&segments, 0, .normal);
             },
             .alert => try self.addTextLine("[alert]", .{ .bold = true, .fg = .{ .index = 3 } }),
             .container => try self.addTextLine("[container]", .{ .dim = true }),
@@ -89,7 +105,7 @@ const Renderer = struct {
             };
             try segments.append(self.allocator, .{ .text = marker, .style = .{ .bold = true, .fg = .{ .index = 6 } } });
             try self.appendSections(&segments, element.text, .{}, null);
-            try self.addLine(&segments);
+            try self.addLine(&segments, 0, .normal);
             try self.renderList(element.children, depth + 1, quote_depth);
         }
     }
@@ -176,8 +192,16 @@ const Renderer = struct {
         try self.document.lines.append(self.allocator, .{ .segments = segments });
     }
 
-    fn addLine(self: *Renderer, segments: *std.ArrayList(vaxis.Segment)) !void {
-        try self.document.lines.append(self.allocator, .{ .segments = try segments.toOwnedSlice(self.allocator) });
+    fn addSpecialLine(self: *Renderer, kind: LineKind, gap_before: u8) !void {
+        try self.document.lines.append(self.allocator, .{ .segments = &.{}, .gap_before = gap_before, .kind = kind });
+    }
+
+    fn addLine(self: *Renderer, segments: *std.ArrayList(vaxis.Segment), gap_before: u8, kind: LineKind) !void {
+        try self.document.lines.append(self.allocator, .{
+            .segments = try segments.toOwnedSlice(self.allocator),
+            .gap_before = gap_before,
+            .kind = kind,
+        });
     }
 };
 
@@ -218,6 +242,7 @@ pub fn main(init: std.process.Init) !void {
     try vx.enterAltScreen(tty.writer());
     try vx.queryTerminal(tty.writer(), .fromSeconds(1));
 
+    const title = if (args.len == 2) std.fs.path.basename(args[1]) else "Markdown concepts";
     var scroll: usize = 0;
     while (true) {
         const event = try loop.nextEvent();
@@ -229,46 +254,208 @@ pub fn main(init: std.process.Init) !void {
                 if (key.matches(vaxis.Key.page_down, .{}) or key.matches('d', .{ .ctrl = true })) scroll +|= @max(vx.window().height / 2, 1);
                 if (key.matches(vaxis.Key.page_up, .{}) or key.matches('u', .{ .ctrl = true })) scroll -|= @max(vx.window().height / 2, 1);
                 if (key.matches(vaxis.Key.home, .{}) or key.matches('g', .{})) scroll = 0;
-                if (key.matches(vaxis.Key.end, .{}) or key.matches('G', .{})) scroll = document.lines.items.len;
+                if (key.matches(vaxis.Key.end, .{}) or key.matches('G', .{})) scroll = std.math.maxInt(usize);
             },
             .winsize => |winsize| try vx.resize(init.gpa, tty.writer(), winsize),
         }
 
         const win = vx.window();
         win.clear();
+        win.hideCursor();
 
-        const content_height = win.height -| 1;
-        const max_scroll = document.lines.items.len -| content_height;
-        scroll = @min(scroll, max_scroll);
-
-        var row: u16 = 0;
-        while (row < content_height and scroll + row < document.lines.items.len) : (row += 1) {
-            _ = win.print(document.lines.items[scroll + row].segments, .{ .row_offset = row, .wrap = .none });
+        if (win.width < 12 or win.height < 5) {
+            _ = win.printSegment(.{ .text = "Terminal too small", .style = .{ .bold = true } }, .{ .wrap = .none });
+            try vx.render(tty.writer());
+            try tty.writer().flush();
+            continue;
         }
 
-        var status_buffer: [512]u8 = undefined;
-        const status = try std.fmt.bufPrint(&status_buffer, " {s}  line {d}/{d}  ↑↓/jk scroll  q quit ", .{
-            if (args.len == 2) std.fs.path.basename(args[1]) else "Markdown concepts",
-            if (document.lines.items.len == 0) 0 else scroll + 1,
-            document.lines.items.len,
+        drawBar(win.child(.{ .height = 1 }), title, .top);
+        drawBar(win.child(.{ .y_off = @intCast(win.height - 1), .height = 1 }), "↑↓/jk scroll  PgUp/PgDn page  g/G top/bottom  q quit", .bottom);
+
+        const outer_margin: u16 = if (win.width >= 100) @min((win.width - 84) / 2, 8) else 1;
+        const body_width = win.width -| (outer_margin * 2) -| 1;
+        const content_height = win.height -| 2;
+        const measure = win.child(.{ .width = body_width, .height = std.math.maxInt(u16) });
+        const total_rows = documentHeight(measure, document.lines.items);
+        const max_scroll = total_rows -| content_height;
+        scroll = @min(scroll, max_scroll);
+
+        const viewport = win.child(.{
+            .x_off = @intCast(outer_margin),
+            .y_off = 1,
+            .width = body_width,
+            .height = content_height,
         });
-        _ = win.printSegment(.{ .text = status, .style = .{ .reverse = true } }, .{ .row_offset = win.height -| 1, .wrap = .none });
+        drawDocument(viewport, document.lines.items, scroll);
+        drawScrollbar(win, scroll, total_rows, content_height);
+
+        var status_buffer: [512]u8 = undefined;
+        const status = try std.fmt.bufPrint(&status_buffer, " {d: >3}% ", .{
+            if (max_scroll == 0) 100 else @min(scroll * 100 / max_scroll, 100),
+        });
+        _ = win.printSegment(.{ .text = status, .style = .{ .bold = true, .reverse = true } }, .{
+            .row_offset = win.height -| 1,
+            .col_offset = win.width -| @as(u16, @intCast(status.len)),
+            .wrap = .none,
+        });
 
         try vx.render(tty.writer());
         try tty.writer().flush();
     }
 }
 
+fn documentHeight(measure: vaxis.Window, lines: []const Line) usize {
+    var total: usize = 0;
+    for (lines) |line| {
+        total += line.gap_before;
+        total += lineHeight(measure, line);
+    }
+    return total;
+}
+
+fn lineHeight(measure: vaxis.Window, line: Line) usize {
+    return switch (line.kind) {
+        .rule => 1,
+        .normal, .code => measuredLineHeight(measure, line.segments),
+        .heading => |level| measuredLineHeight(measure, line.segments) + @as(usize, switch (level) {
+            1 => 2,
+            2 => 1,
+            else => 0,
+        }),
+    };
+}
+
+fn measuredLineHeight(measure: vaxis.Window, segments: []const vaxis.Segment) usize {
+    if (segments.len == 0) return 1;
+    const result = measure.print(segments, .{ .wrap = .word, .commit = false });
+    return @max(@as(usize, result.row) + @intFromBool(result.col > 0), 1);
+}
+
+fn drawDocument(viewport: vaxis.Window, lines: []const Line, scroll: usize) void {
+    var document_row: usize = 0;
+    for (lines) |line| {
+        document_row += line.gap_before;
+        const height = lineHeight(viewport, line);
+        const line_end = document_row + height;
+        if (line_end > scroll and document_row < scroll + viewport.height) {
+            const visible_start = scroll -| document_row;
+            const screen_row: i17 = @intCast(document_row -| scroll);
+            const line_window = viewport.child(.{
+                .y_off = screen_row - @as(i17, @intCast(visible_start)),
+                .height = @intCast(@min(height, std.math.maxInt(u16))),
+            });
+
+            switch (line.kind) {
+                .rule => drawRule(viewport, @intCast(document_row - scroll)),
+                .heading => |level| {
+                    drawHeadingBackground(line_window, level);
+                    _ = line_window.print(line.segments, .{
+                        .row_offset = if (level == 1) 1 else 0,
+                        .wrap = .word,
+                    });
+                    if (level == 2) drawHeadingDivider(line_window, height);
+                },
+                .code => {
+                    line_window.fill(.{ .char = .{ .grapheme = " " }, .style = .{ .bg = .{ .index = 0 } } });
+                    _ = line_window.print(line.segments, .{ .wrap = .word });
+                },
+                .normal => _ = line_window.print(line.segments, .{ .wrap = .word }),
+            }
+        }
+        document_row = line_end;
+        if (document_row >= scroll + viewport.height) break;
+    }
+}
+
+fn drawRule(viewport: vaxis.Window, row: u16) void {
+    if (row >= viewport.height) return;
+    var col: u16 = 0;
+    while (col < viewport.width) : (col += 1) {
+        viewport.writeCell(col, row, .{
+            .char = .{ .grapheme = "─" },
+            .style = .{ .fg = .{ .index = 8 } },
+        });
+    }
+}
+
+fn drawHeadingBackground(win: vaxis.Window, level: u8) void {
+    if (level > 2) return;
+    const style: vaxis.Style = if (level == 1)
+        .{ .fg = .{ .index = 15 }, .bg = .{ .index = 5 }, .bold = true }
+    else
+        .{ .fg = .{ .index = 15 }, .bg = .{ .index = 4 }, .bold = true };
+    win.fill(.{ .char = .{ .grapheme = " " }, .style = style });
+}
+
+fn drawHeadingDivider(win: vaxis.Window, height: usize) void {
+    if (height == 0 or height > win.height) return;
+    const row: u16 = @intCast(height - 1);
+    var col: u16 = 0;
+    while (col < win.width) : (col += 1) {
+        win.writeCell(col, row, .{
+            .char = .{ .grapheme = "─" },
+            .style = .{ .fg = .{ .index = 6 }, .bg = .{ .index = 4 } },
+        });
+    }
+}
+
+fn drawScrollbar(win: vaxis.Window, scroll: usize, total_rows: usize, viewport_height: u16) void {
+    if (total_rows <= viewport_height or viewport_height == 0) return;
+    const track_height: usize = viewport_height;
+    const thumb_height = @max(track_height * track_height / total_rows, 1);
+    const max_scroll = total_rows - track_height;
+    const thumb_start = scroll * (track_height - thumb_height) / max_scroll;
+    const col = win.width - 1;
+
+    for (0..track_height) |row| {
+        win.writeCell(col, @intCast(row + 1), .{
+            .char = .{ .grapheme = if (row >= thumb_start and row < thumb_start + thumb_height) "█" else "│" },
+            .style = .{ .fg = .{ .index = if (row >= thumb_start and row < thumb_start + thumb_height) 6 else 8 } },
+        });
+    }
+}
+
+fn drawBar(win: vaxis.Window, text: []const u8, position: enum { top, bottom }) void {
+    const style: vaxis.Style = switch (position) {
+        .top => .{ .bold = true, .fg = .{ .index = 15 }, .bg = .{ .index = 4 } },
+        .bottom => .{ .fg = .{ .index = 15 }, .bg = .{ .index = 8 } },
+    };
+    win.fill(.{ .char = .{ .grapheme = " " }, .style = style });
+    _ = win.printSegment(.{ .text = if (position == .top) "  Markdown  " else "  ", .style = style }, .{ .wrap = .none });
+    _ = win.printSegment(.{ .text = text, .style = style }, .{
+        .col_offset = if (position == .top) 12 else 2,
+        .wrap = .none,
+    });
+}
+
 fn headingStyle(level: u8) vaxis.Style {
-    return .{
-        .bold = true,
-        .ul_style = if (level <= 2) .single else .off,
-        .fg = .{ .index = switch (level) {
-            1 => 5,
-            2 => 4,
-            3 => 6,
-            else => 3,
-        } },
+    return switch (level) {
+        1 => .{ .bold = true, .fg = .{ .index = 15 }, .bg = .{ .index = 5 } },
+        2 => .{ .bold = true, .fg = .{ .index = 15 }, .bg = .{ .index = 4 } },
+        3 => .{ .bold = true, .ul_style = .single, .fg = .{ .index = 6 } },
+        4 => .{ .bold = true, .fg = .{ .index = 3 } },
+        5 => .{ .bold = true, .dim = true, .fg = .{ .index = 6 } },
+        else => .{ .italic = true, .dim = true },
+    };
+}
+
+fn headingMarker(level: u8) []const u8 {
+    return switch (level) {
+        1 => "  ◆  ",
+        2 => "  ◇  ",
+        3 => "▸ ",
+        4 => "› ",
+        5 => "· ",
+        else => "  ",
+    };
+}
+
+fn headingGap(level: u8) u8 {
+    return switch (level) {
+        1, 2 => 2,
+        3, 4 => 1,
+        else => 0,
     };
 }
 
@@ -278,4 +465,8 @@ fn segment(text: []const u8, style: vaxis.Style, link: ?[]const u8) vaxis.Segmen
         .style = style,
         .link = if (link) |uri| .{ .uri = uri } else .{},
     };
+}
+
+fn applyBackground(segments: []vaxis.Segment, background: vaxis.Color) void {
+    for (segments) |*item| item.style.bg = background;
 }
