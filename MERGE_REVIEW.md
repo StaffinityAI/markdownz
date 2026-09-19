@@ -1,7 +1,7 @@
 # Remaining Merge Review Findings
 
 - [x] Use frame-scoped allocation for transient DVUI table rendering data.
-- [ ] Clip partially visible Vaxis headings, code blocks, and images without negative child windows.
+- [x] Clip partially visible Vaxis headings, code blocks, and images without negative child windows.
 - [ ] Measure Vaxis lines taller than 65,535 terminal rows without truncating document height.
 - [ ] Invalidate the DVUI parser graph cache when the Markdown source or parser options change.
 - [ ] Preserve line breaks when rendering unclosed fenced code blocks in DVUI.

@@ -489,12 +489,12 @@ fn drawDocument(viewport: vaxis.Window, lines: []const Line, scroll: usize) void
             const visible_start = scroll -| document_row;
             const screen_row: u16 = @intCast(document_row -| scroll);
             const visible_height: u16 = @intCast(@min(height - visible_start, viewport.height - screen_row));
+            const visible_window = viewport.child(.{
+                .y_off = @intCast(screen_row),
+                .height = visible_height,
+            });
             if (line.kind == .table) {
-                const line_window = viewport.child(.{
-                    .y_off = @intCast(screen_row),
-                    .height = visible_height,
-                });
-                drawTable(line_window, line.kind.table, visible_start);
+                drawTable(visible_window, line.kind.table, visible_start);
                 document_row = line_end;
                 if (document_row >= scroll + viewport.height) break;
                 continue;
@@ -513,7 +513,7 @@ fn drawDocument(viewport: vaxis.Window, lines: []const Line, scroll: usize) void
             switch (line.kind) {
                 .rule => drawRule(viewport, @intCast(document_row - scroll)),
                 .heading => |level| {
-                    drawHeadingBackground(line_window, level);
+                    drawHeadingBackground(visible_window, level);
                     _ = line_window.print(line.segments, .{
                         .row_offset = if (level == 1) 1 else 0,
                         .wrap = .word,
@@ -521,14 +521,14 @@ fn drawDocument(viewport: vaxis.Window, lines: []const Line, scroll: usize) void
                     if (level == 2) drawHeadingDivider(line_window, height);
                 },
                 .code => {
-                    line_window.fill(.{ .char = .{ .grapheme = " " }, .style = .{ .bg = .{ .index = 0 } } });
+                    visible_window.fill(.{ .char = .{ .grapheme = " " }, .style = .{ .bg = .{ .index = 0 } } });
                     _ = line_window.print(line.segments, .{ .wrap = .word });
                 },
                 .image => |image| {
-                    if (image.image) |loaded| {
-                        loaded.draw(line_window, .{ .scale = .contain }) catch drawImageFallback(line_window, line.segments);
+                    if (visible_start == 0 and image.image != null) {
+                        image.image.?.draw(visible_window, .{ .scale = .contain }) catch drawImageFallback(visible_window, line.segments);
                     } else {
-                        drawImageFallback(line_window, line.segments);
+                        drawImageFallback(visible_window, line.segments);
                     }
                 },
                 .table => unreachable,
