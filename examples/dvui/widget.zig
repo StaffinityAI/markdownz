@@ -188,18 +188,32 @@ pub const Renderer = struct {
     fn renderList(self: *Renderer, list: std.ArrayList(*Parser.Node.Element), iter: usize, options: InitOptions) void {
         const tl = self.getTextLayout();
 
-        var initial: usize = 0;
+        var ordered_initial: usize = 0;
+        var ordered_index: usize = 0;
+        var in_ordered_run = false;
         for (list.items, 0..) |element, i| {
             switch (element.data) {
                 .ordered => |num| {
-                    if (initial == 0) initial = if (options.ordered_list_alphabetic) 'a' else @max(num, 1);
-                    tl.format("{[num]d:>[i]}. ", .{ .i = iter * 4, .num = initial + i }, .{});
+                    if (!in_ordered_run) {
+                        ordered_initial = @max(num, 1);
+                        ordered_index = 0;
+                        in_ordered_run = true;
+                    }
+                    if (options.ordered_list_alphabetic) {
+                        const marker: u8 = @intCast('a' + (ordered_index % 26));
+                        tl.format("{[marker]c:>[i]}. ", .{ .i = iter * 4, .marker = marker }, .{});
+                    } else {
+                        tl.format("{[num]d:>[i]}. ", .{ .i = iter * 4, .num = ordered_initial + ordered_index }, .{});
+                    }
+                    ordered_index += 1;
                 },
                 .unordered => {
+                    in_ordered_run = false;
                     const indicator = options.unordered_list_indicators[iter % options.unordered_list_indicators.len];
                     tl.format("{[indicator]s:>[i]} ", .{ .i = iter * 4, .indicator = indicator }, .{});
                 },
                 .task => |done| {
+                    in_ordered_run = false;
                     if (iter > 0) tl.format("{[e]c:<[i]}", .{ .e = ' ', .i = iter * 4 }, .{});
                     var wdo: dvui.WidgetData = undefined;
                     checkbox(@src(), done, .{
