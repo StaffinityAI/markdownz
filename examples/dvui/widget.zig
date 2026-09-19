@@ -5,6 +5,12 @@ const Parser = @import("markdown");
 
 const MarkdownWidget = @This();
 
+const CachedGraph = struct {
+    source_hash: u64,
+    source_len: usize,
+    graph: []*Parser.Node,
+};
+
 pub const InitOptions = struct {
     /// Used for Code Block rendering
     tree_sitter: ?dvui.TextEntryWidget.InitOptions.TreeSitterOption = null,
@@ -33,14 +39,18 @@ pub fn init(src: std.builtin.SourceLocation, arena: *std.heap.ArenaAllocator, fi
     defer main_box.deinit();
 
     const graph_id = dvui.parentGet().extendId(src, 0);
-
-    var graph = dvui.dataGet(null, graph_id, "__graph", []*Parser.Node);
-    if (graph == null) {
-        graph = try Parser.parse(arena.allocator(), file, .{});
-        dvui.dataSet(null, graph_id, "__graph", graph.?);
+    const source_hash = std.hash.Wyhash.hash(0, file);
+    var cached = dvui.dataGet(null, graph_id, "__graph", CachedGraph);
+    if (cached == null or cached.?.source_hash != source_hash or cached.?.source_len != file.len) {
+        cached = .{
+            .source_hash = source_hash,
+            .source_len = file.len,
+            .graph = try Parser.parse(arena.allocator(), file, .{}),
+        };
+        dvui.dataSet(null, graph_id, "__graph", cached.?);
     }
 
-    try Renderer.init(arena.child_allocator, graph.?, options);
+    try Renderer.init(arena.child_allocator, cached.?.graph, options);
 }
 
 pub const Renderer = struct {
