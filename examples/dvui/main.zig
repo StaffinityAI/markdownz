@@ -109,25 +109,24 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn getImage(path_or_url: []const u8) dvui.Texture.ImageSource {
+fn getImage(path_or_url: []const u8) ?dvui.Texture.ImageSource {
     if (image_cache.get(path_or_url)) |cached| return imageSource(path_or_url, cached);
 
     const bytes = loadImage(path_or_url) catch |err| {
-        std.log.warn("unable to load image '{s}': {s}", .{ path_or_url, @errorName(err) });
-        image_cache.put(image_arena, image_arena.dupe(u8, path_or_url) catch return imageSource(path_or_url, .failed), .failed) catch {};
-        return imageSource(path_or_url, .failed);
+        if (!@import("builtin").is_test) std.log.warn("unable to load image '{s}': {s}", .{ path_or_url, @errorName(err) });
+        image_cache.put(image_arena, image_arena.dupe(u8, path_or_url) catch return null, .failed) catch {};
+        return null;
     };
 
     image_cache.put(image_arena, image_arena.dupe(u8, path_or_url) catch return imageSource(path_or_url, .{ .loaded = bytes }), .{ .loaded = bytes }) catch {};
     return imageSource(path_or_url, .{ .loaded = bytes });
 }
 
-fn imageSource(path_or_url: []const u8, cached: CachedImage) dvui.Texture.ImageSource {
-    const bytes = switch (cached) {
-        .loaded => |loaded| loaded,
-        .failed => &.{},
+fn imageSource(path_or_url: []const u8, cached: CachedImage) ?dvui.Texture.ImageSource {
+    return switch (cached) {
+        .loaded => |bytes| .{ .imageFile = .{ .bytes = bytes, .name = path_or_url } },
+        .failed => null,
     };
-    return .{ .imageFile = .{ .bytes = bytes, .name = path_or_url } };
 }
 
 fn loadImage(path_or_url: []const u8) ![]const u8 {
@@ -154,6 +153,14 @@ fn loadImage(path_or_url: []const u8) ![]const u8 {
 }
 
 test "failed image loads are cached" {
+    const previous_cache = image_cache;
+    const previous_arena = image_arena;
+    const previous_attempts = image_load_attempts;
+    defer {
+        image_cache = previous_cache;
+        image_arena = previous_arena;
+        image_load_attempts = previous_attempts;
+    }
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     image_arena = arena.allocator();

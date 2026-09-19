@@ -6,11 +6,17 @@ const Parser = @import("markdown");
 const MarkdownWidget = @This();
 
 const CachedGraph = struct {
+    arena: std.heap.ArenaAllocator,
     source_hash: u64,
     source_len: usize,
     options_hash: u8,
     generation: usize,
     graph: []*Parser.Node,
+
+    fn deinit(ptr: *anyopaque) void {
+        const self: *CachedGraph = @ptrCast(@alignCast(ptr));
+        self.arena.deinit();
+    }
 };
 
 const CachedCodeBuffer = struct {
@@ -38,7 +44,7 @@ pub const InitOptions = struct {
         manual_scale: bool = false,
         calculate_custom_scale: ?*const fn (image_size: dvui.Size) struct { min: ?dvui.Size, max: ?dvui.Size } = null,
     } = .{},
-    get_image: *const fn (path_or_url: []const u8) dvui.Texture.ImageSource,
+    get_image: *const fn (path_or_url: []const u8) ?dvui.Texture.ImageSource,
     /// This is for shortcodes such as `:joy:` not for `UTF-8` codes
     render_emoji: ?*const fn (tl: *dvui.TextLayoutWidget, shortcode: []const u8, option_stack: dvui.Options) void = null,
 };
@@ -50,21 +56,41 @@ pub fn init(src: std.builtin.SourceLocation, arena: *std.heap.ArenaAllocator, fi
     const graph_id = dvui.parentGet().extendId(src, 0);
     const source_hash = std.hash.Wyhash.hash(0, file);
     const options_hash = parserOptionsHash(options.parser);
-    var cached = dvui.dataGet(null, graph_id, "__graph", CachedGraph);
-    if (cached == null or cached.?.source_hash != source_hash or cached.?.source_len != file.len or cached.?.options_hash != options_hash) {
+    var cached = dvui.dataGetPtr(null, graph_id, "__graph", CachedGraph);
+    if (graphNeedsUpdate(cached, source_hash, file.len, options_hash)) {
         const generation = if (cached) |previous| previous.generation +% 1 else 0;
-        _ = arena.reset(.retain_capacity);
-        cached = .{
+        var new_arena = std.heap.ArenaAllocator.init(arena.child_allocator);
+        var owns_new_arena = true;
+        errdefer if (owns_new_arena) new_arena.deinit();
+        const graph = try Parser.parse(new_arena.allocator(), file, options.parser);
+        const new_cached: CachedGraph = .{
+            .arena = new_arena,
             .source_hash = source_hash,
             .source_len = file.len,
             .options_hash = options_hash,
             .generation = generation,
-            .graph = try Parser.parse(arena.allocator(), file, options.parser),
+            .graph = graph,
         };
-        dvui.dataSet(null, graph_id, "__graph", cached.?);
+        const old_arena = if (cached) |previous| previous.arena else null;
+        dvui.dataSet(null, graph_id, "__graph", new_cached);
+        const installed = dvui.dataGetPtr(null, graph_id, "__graph", CachedGraph) orelse {
+            return error.OutOfMemory;
+        };
+        if (installed.generation != generation or installed.source_hash != source_hash or installed.options_hash != options_hash) {
+            return error.OutOfMemory;
+        }
+        owns_new_arena = false;
+        if (old_arena) |old| old.deinit();
+        dvui.dataSetDeinitFunction(null, graph_id, "__graph", &CachedGraph.deinit);
+        cached = installed;
     }
 
-    try Renderer.init(arena.allocator(), cached.?.graph, cached.?.generation, options);
+    try Renderer.init(cached.?.arena.allocator(), cached.?.graph, cached.?.generation, options);
+}
+
+fn graphNeedsUpdate(cached: ?*const CachedGraph, source_hash: u64, source_len: usize, options_hash: u8) bool {
+    const current = cached orelse return true;
+    return current.source_hash != source_hash or current.source_len != source_len or current.options_hash != options_hash;
 }
 
 fn parserOptionsHash(options: Parser.Options) u8 {
@@ -72,6 +98,26 @@ fn parserOptionsHash(options: Parser.Options) u8 {
         (@as(u8, @intFromBool(options.parse_arbitrary_urls)) << 1) |
         (@as(u8, @intFromBool(options.underline_extension)) << 2) |
         (@as(u8, @intFromBool(options.typographic_replacement)) << 3);
+}
+
+test "parser options participate in graph cache identity" {
+    const loose = parserOptionsHash(.{ .mode = .loose });
+    const strict = parserOptionsHash(.{ .mode = .strict });
+    try std.testing.expect(loose != strict);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cached: CachedGraph = .{
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
+        .source_hash = 1,
+        .source_len = 2,
+        .options_hash = loose,
+        .generation = 0,
+        .graph = &.{},
+    };
+    defer cached.arena.deinit();
+    try std.testing.expect(!graphNeedsUpdate(&cached, 1, 2, loose));
+    try std.testing.expect(graphNeedsUpdate(&cached, 1, 2, strict));
 }
 
 pub const Renderer = struct {
@@ -257,7 +303,10 @@ pub const Renderer = struct {
                 },
                 .unordered => {
                     in_ordered_run = false;
-                    const indicator = options.unordered_list_indicators[iter % options.unordered_list_indicators.len];
+                    const indicator = if (options.unordered_list_indicators.len == 0)
+                        "•"
+                    else
+                        options.unordered_list_indicators[iter % options.unordered_list_indicators.len];
                     tl.format("{[indicator]s:>[i]} ", .{ .i = iter * 4, .indicator = indicator }, .{});
                 },
                 .task => |done| {
@@ -455,7 +504,10 @@ pub const Renderer = struct {
                 },
                 .image => |image| {
                     const parent_rect = dvui.parentGet().data().rect;
-                    const image_source = options.get_image(image.path);
+                    const image_source = options.get_image(image.path) orelse {
+                        iterateSections(tl, dvui_opts, image.alt_text, url, options);
+                        continue;
+                    };
 
                     const image_size = dvui.imageSize(image_source) catch {
                         iterateSections(tl, dvui_opts, image.alt_text, url, options);
@@ -492,8 +544,6 @@ pub const Renderer = struct {
                     }
 
                     const wdo = dvui.image(@src(), .{ .source = image_source, .shrink = .ratio }, image_options);
-
-                    dvui.log.info("Image Rect: {any}", .{wdo.rect});
 
                     tl.insert_pt.y += wdo.rect.h;
                     // TODO: Remove this when dvui fixes the issue
