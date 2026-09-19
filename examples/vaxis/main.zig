@@ -60,6 +60,34 @@ const Document = struct {
     }
 };
 
+const DocumentLayout = struct {
+    width: u16 = 0,
+    starts: std.ArrayList(usize) = .empty,
+    heights: std.ArrayList(usize) = .empty,
+    total_rows: usize = 0,
+
+    fn deinit(self: *DocumentLayout, allocator: std.mem.Allocator) void {
+        self.starts.deinit(allocator);
+        self.heights.deinit(allocator);
+    }
+
+    fn update(self: *DocumentLayout, allocator: std.mem.Allocator, measure: vaxis.Window, lines: []const Line) !void {
+        if (self.width == measure.width and self.starts.items.len == lines.len) return;
+        self.width = measure.width;
+        self.starts.clearRetainingCapacity();
+        self.heights.clearRetainingCapacity();
+        var total: usize = 0;
+        for (lines) |line| {
+            total += line.gap_before;
+            try self.starts.append(allocator, total);
+            const height = lineHeight(measure, line);
+            try self.heights.append(allocator, height);
+            total += height;
+        }
+        self.total_rows = total;
+    }
+};
+
 const Renderer = struct {
     allocator: std.mem.Allocator,
     document: *Document,
@@ -320,6 +348,8 @@ pub fn main(init: std.process.Init) !void {
 
     const title = if (args.len == 2) std.fs.path.basename(args[1]) else "Markdown concepts";
     var scroll: usize = 0;
+    var layout: DocumentLayout = .{};
+    defer layout.deinit(init.gpa);
     while (true) {
         const event = try loop.nextEvent();
         switch (event) {
@@ -353,7 +383,8 @@ pub fn main(init: std.process.Init) !void {
         const body_width = win.width -| (outer_margin * 2) -| 1;
         const content_height = win.height -| 2;
         const measure = win.child(.{ .width = body_width, .height = std.math.maxInt(u16) });
-        const total_rows = documentHeight(measure, document.lines.items);
+        try layout.update(init.gpa, measure, document.lines.items);
+        const total_rows = layout.total_rows;
         const max_scroll = total_rows -| content_height;
         scroll = @min(scroll, max_scroll);
 
@@ -363,7 +394,7 @@ pub fn main(init: std.process.Init) !void {
             .width = body_width,
             .height = content_height,
         });
-        drawDocument(viewport, document.lines.items, scroll);
+        drawDocument(viewport, document.lines.items, layout, scroll);
         drawScrollbar(win, scroll, total_rows, content_height);
 
         var status_buffer: [512]u8 = undefined;
@@ -429,15 +460,6 @@ fn standaloneImage(sections: []markdown.Node.Section) ?ImageRef {
     };
 }
 
-fn documentHeight(measure: vaxis.Window, lines: []const Line) usize {
-    var total: usize = 0;
-    for (lines) |line| {
-        total += line.gap_before;
-        total += lineHeight(measure, line);
-    }
-    return total;
-}
-
 fn lineHeight(measure: vaxis.Window, line: Line) usize {
     return switch (line.kind) {
         .rule => 1,
@@ -481,12 +503,14 @@ fn measuredLineHeight(measure: vaxis.Window, segments: []const vaxis.Segment) us
     var row: usize = 0;
     var col: usize = 0;
     var soft_wrapped = false;
+    var in_word = false;
     for (segments) |text_segment| {
         var lines: TextLineIterator = .{ .buf = text_segment.text };
         while (lines.next()) |line| {
             var tokens: WordTokenizer = .{ .buf = line };
             while (tokens.next()) |token| switch (token) {
                 .whitespace => |len| {
+                    in_word = false;
                     if (soft_wrapped) continue;
                     for (0..len) |_| {
                         if (col >= measure.width) {
@@ -499,14 +523,22 @@ fn measuredLineHeight(measure: vaxis.Window, segments: []const vaxis.Segment) us
                 },
                 .word => |word| {
                     const width = measuredTextWidth(measure, word);
-                    if (width + col > measure.width and width < measure.width) {
+                    if (!in_word and width + col > measure.width and width <= measure.width) {
                         row += 1;
                         col = 0;
                     }
+                    in_word = true;
                     var graphemes = vaxis.unicode.graphemeIterator(word);
                     while (graphemes.next()) |grapheme| {
                         soft_wrapped = false;
-                        col += measure.gwidth(grapheme.bytes(word));
+                        const grapheme_width = measure.gwidth(grapheme.bytes(word));
+                        if (grapheme_width == 0) continue;
+                        if (grapheme_width > measure.width) continue;
+                        if (col != 0 and col + grapheme_width > measure.width) {
+                            row += 1;
+                            col = 0;
+                        }
+                        col += grapheme_width;
                         if (col >= measure.width) {
                             row += 1;
                             col = 0;
@@ -517,6 +549,7 @@ fn measuredLineHeight(measure: vaxis.Window, segments: []const vaxis.Segment) us
             };
             if (lines.has_break) {
                 soft_wrapped = false;
+                in_word = false;
                 row += 1;
                 col = 0;
             }
@@ -532,16 +565,18 @@ fn measuredTextWidth(measure: vaxis.Window, text: []const u8) usize {
     return width;
 }
 
-fn drawWrappedSegments(win: vaxis.Window, segments: []const vaxis.Segment, skipped_rows: usize, row_offset: usize) void {
+fn drawWrappedSegments(win: vaxis.Window, segments: []const vaxis.Segment, skipped_rows: usize, row_offset: usize, col_offset: usize) void {
     var row = row_offset;
-    var col: usize = 0;
+    var col = col_offset;
     var soft_wrapped = false;
+    var in_word = false;
     for (segments) |text_segment| {
         var lines: TextLineIterator = .{ .buf = text_segment.text };
         while (lines.next()) |line| {
             var tokens: WordTokenizer = .{ .buf = line };
             while (tokens.next()) |token| switch (token) {
                 .whitespace => |len| {
+                    in_word = false;
                     if (soft_wrapped) continue;
                     for (0..len) |_| {
                         if (col >= win.width) {
@@ -555,15 +590,22 @@ fn drawWrappedSegments(win: vaxis.Window, segments: []const vaxis.Segment, skipp
                 },
                 .word => |word| {
                     const width = measuredTextWidth(win, word);
-                    if (width + col > win.width and width < win.width) {
+                    if (!in_word and width + col > win.width and width <= win.width) {
                         row += 1;
                         col = 0;
                     }
+                    in_word = true;
                     var graphemes = vaxis.unicode.graphemeIterator(word);
                     while (graphemes.next()) |grapheme| {
                         soft_wrapped = false;
                         const bytes = grapheme.bytes(word);
                         const grapheme_width = win.gwidth(bytes);
+                        if (grapheme_width == 0) continue;
+                        if (grapheme_width > win.width) continue;
+                        if (col != 0 and col + grapheme_width > win.width) {
+                            row += 1;
+                            col = 0;
+                        }
                         writeVisibleTextCell(win, row, col, skipped_rows, bytes, @intCast(grapheme_width), text_segment);
                         col += grapheme_width;
                         if (col >= win.width) {
@@ -576,6 +618,7 @@ fn drawWrappedSegments(win: vaxis.Window, segments: []const vaxis.Segment, skipp
             };
             if (lines.has_break) {
                 soft_wrapped = false;
+                in_word = false;
                 row += 1;
                 col = 0;
             }
@@ -610,7 +653,7 @@ const TextLineIterator = struct {
         if (self.index >= self.buf.len) return null;
         const start = self.index;
         const end = std.mem.indexOfAnyPos(u8, self.buf, self.index, "\r\n") orelse {
-            if (start == 0) self.has_break = false;
+            self.has_break = false;
             self.index = self.buf.len;
             return self.buf[start..];
         };
@@ -647,11 +690,12 @@ const WordTokenizer = struct {
     }
 };
 
-fn drawDocument(viewport: vaxis.Window, lines: []const Line, scroll: usize) void {
-    var document_row: usize = 0;
-    for (lines) |line| {
-        document_row += line.gap_before;
-        const height = lineHeight(viewport, line);
+fn drawDocument(viewport: vaxis.Window, lines: []const Line, layout: DocumentLayout, scroll: usize) void {
+    var index = firstVisibleLine(layout, scroll);
+    while (index < lines.len) : (index += 1) {
+        const line = lines[index];
+        const document_row = layout.starts.items[index];
+        const height = layout.heights.items[index];
         const line_end = document_row + height;
         if (line_end > scroll and document_row < scroll + viewport.height) {
             const visible_start = scroll -| document_row;
@@ -663,8 +707,7 @@ fn drawDocument(viewport: vaxis.Window, lines: []const Line, scroll: usize) void
             });
             if (line.kind == .table) {
                 drawTable(visible_window, line.kind.table, visible_start);
-                document_row = line_end;
-                if (document_row >= scroll + viewport.height) break;
+                if (line_end >= scroll + viewport.height) break;
                 continue;
             }
 
@@ -672,27 +715,44 @@ fn drawDocument(viewport: vaxis.Window, lines: []const Line, scroll: usize) void
                 .rule => drawRule(viewport, @intCast(document_row - scroll)),
                 .heading => |level| {
                     drawHeadingBackground(visible_window, level);
-                    drawWrappedSegments(visible_window, line.segments, visible_start, if (level == 1) 1 else 0);
+                    drawWrappedSegments(visible_window, line.segments, visible_start, if (level == 1) 1 else 0, 0);
                     if (level == 2) drawHeadingDivider(visible_window, height, visible_start);
                 },
                 .code => {
                     visible_window.fill(.{ .char = .{ .grapheme = " " }, .style = .{ .bg = .{ .index = 0 } } });
-                    drawWrappedSegments(visible_window, line.segments, visible_start, 0);
+                    drawWrappedSegments(visible_window, line.segments, visible_start, 0, 0);
                 },
                 .image => |image| {
-                    if (visible_start == 0 and image.image != null) {
-                        image.image.?.draw(visible_window, .{ .scale = .contain }) catch drawImageFallback(visible_window, line.segments);
+                    if (visible_start == 0 and visible_height == height) {
+                        if (image.image) |loaded| {
+                            loaded.draw(visible_window, .{ .scale = .contain }) catch drawImageFallback(visible_window, line.segments);
+                        } else {
+                            drawImageFallback(visible_window, line.segments);
+                        }
                     } else {
-                        drawImageFallback(visible_window, line.segments);
+                        drawClippedImagePlaceholder(visible_window, line.segments, visible_start, image.image != null);
                     }
                 },
                 .table => unreachable,
-                .normal => drawWrappedSegments(visible_window, line.segments, visible_start, 0),
+                .normal => drawWrappedSegments(visible_window, line.segments, visible_start, 0, 0),
             }
         }
-        document_row = line_end;
-        if (document_row >= scroll + viewport.height) break;
+        if (line_end >= scroll + viewport.height) break;
     }
+}
+
+fn firstVisibleLine(layout: DocumentLayout, scroll: usize) usize {
+    var low: usize = 0;
+    var high = layout.starts.items.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (layout.starts.items[mid] + layout.heights.items[mid] <= scroll) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
 }
 
 const TableWidths = struct {
@@ -816,16 +876,14 @@ fn drawTableRow(
         else
             column.header;
         const content_width = cell_width -| 2;
-        if (skipped > std.math.maxInt(i17)) continue;
         const content = cell.child(.{
             .x_off = 1,
-            .y_off = -@as(i17, @intCast(skipped)),
             .width = content_width,
-            .height = @intCast(@min(skipped + win.height, std.math.maxInt(u16))),
+            .height = win.height,
         });
         const text_height = measuredLineHeight(content, segments);
         const col_offset = tableTextOffset(content, segments, text_height, column.alignment);
-        _ = content.print(segments, .{ .col_offset = col_offset, .wrap = .word });
+        drawWrappedSegments(content, segments, skipped, 0, col_offset);
     }
 }
 
@@ -887,6 +945,15 @@ fn drawImageFallback(win: vaxis.Window, segments: []const vaxis.Segment) void {
         .text = "Kitty graphics support is unavailable in this terminal.",
         .style = .{ .dim = true },
     }, .{ .row_offset = 3, .col_offset = 2, .wrap = .word });
+}
+
+fn drawClippedImagePlaceholder(win: vaxis.Window, segments: []const vaxis.Segment, skipped_rows: usize, loaded: bool) void {
+    win.fill(.{ .char = .{ .grapheme = " " }, .style = .{ .bg = .{ .index = 0 } } });
+    drawWrappedSegments(win, segments, skipped_rows, 1, 0);
+    drawWrappedSegments(win, &.{.{
+        .text = if (loaded) "Image preview is shown when the full image block is visible." else "Image preview is unavailable.",
+        .style = .{ .dim = true },
+    }}, skipped_rows, 3, 0);
 }
 
 fn drawHeadingBackground(win: vaxis.Window, level: u8) void {
@@ -985,12 +1052,87 @@ test "line measurement exceeds u16 row limits" {
         .y_pixel = 1,
     });
     defer screen.deinit(std.testing.allocator);
+    screen.width_method = .unicode;
     var vx: vaxis.Vaxis = undefined;
     vx.screen = screen;
     const text = try std.testing.allocator.alloc(u8, 70_000);
     defer std.testing.allocator.free(text);
     @memset(text, 'a');
     try std.testing.expect(measuredLineHeight(vx.window(), &.{.{ .text = text }}) > std.math.maxInt(u16));
+}
+
+test "wrapping handles wide zero-width and styled newline segments" {
+    var screen = try vaxis.Screen.init(std.testing.allocator, .{
+        .rows = 4,
+        .cols = 3,
+        .x_pixel = 3,
+        .y_pixel = 4,
+    });
+    defer screen.deinit(std.testing.allocator);
+    screen.width_method = .unicode;
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = screen;
+    const win = vx.window();
+    const wide = &[_]vaxis.Segment{.{ .text = "ab😀" }};
+    try std.testing.expectEqual(@as(usize, 2), measuredLineHeight(win, wide));
+    drawWrappedSegments(win, wide, 0, 0, 0);
+    try std.testing.expectEqualStrings("a", screen.buf[0].char.grapheme);
+    try std.testing.expectEqualStrings("😀", screen.buf[3].char.grapheme);
+
+    const styled = &[_]vaxis.Segment{
+        .{ .text = "a\nb", .style = .{ .bold = true } },
+        .{ .text = "c", .style = .{ .italic = true } },
+    };
+    try std.testing.expectEqual(@as(usize, 2), measuredLineHeight(win, styled));
+
+    const zero_width = &[_]vaxis.Segment{.{ .text = "a\u{200b}b" }};
+    try std.testing.expectEqual(@as(usize, 1), measuredLineHeight(win, zero_width));
+}
+
+test "extreme table cells draw visible slices" {
+    var screen = try vaxis.Screen.init(std.testing.allocator, .{
+        .rows = 3,
+        .cols = 5,
+        .x_pixel = 5,
+        .y_pixel = 3,
+    });
+    defer screen.deinit(std.testing.allocator);
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = screen;
+
+    const text = try std.testing.allocator.alloc(u8, 70_000);
+    defer std.testing.allocator.free(text);
+    @memset(text, 'a');
+    const values = [_][]const vaxis.Segment{&.{.{ .text = text }}};
+    const columns = [_]TableColumn{.{
+        .alignment = .left,
+        .header = &.{.{ .text = "H" }},
+        .values = &values,
+    }};
+    const table: TableBlock = .{ .columns = &columns, .row_count = 1 };
+    drawVisibleTableRow(vx.window(), 0, 65_536, table, tableColumnWidths(5, 1), 0, false, 70_000);
+    try std.testing.expectEqualStrings("a", screen.buf[2].char.grapheme);
+}
+
+test "document layout caches heights and locates visible lines" {
+    var screen = try vaxis.Screen.init(std.testing.allocator, .{
+        .rows = 4,
+        .cols = 10,
+        .x_pixel = 10,
+        .y_pixel = 4,
+    });
+    defer screen.deinit(std.testing.allocator);
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = screen;
+    const lines = [_]Line{
+        .{ .segments = &.{.{ .text = "first" }} },
+        .{ .segments = &.{.{ .text = "second" }}, .gap_before = 2 },
+    };
+    var layout: DocumentLayout = .{};
+    defer layout.deinit(std.testing.allocator);
+    try layout.update(std.testing.allocator, vx.window(), &lines);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 3 }, layout.starts.items);
+    try std.testing.expectEqual(@as(usize, 1), firstVisibleLine(layout, 2));
 }
 
 fn applyBackground(segments: []vaxis.Segment, background: vaxis.Color) void {
