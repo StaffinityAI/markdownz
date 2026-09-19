@@ -7,9 +7,10 @@ test "default viewer document exercises supported concepts" {
     defer arena.deinit();
 
     const nodes = try markdown.parse(arena.allocator(), default_document.source, .{});
-    try std.testing.expectEqual(@as(usize, 1), nodes.len);
+    try std.testing.expectEqual(@as(usize, 2), nodes.len);
     try std.testing.expect(nodes[0].* == .heading);
     try std.testing.expectEqualStrings("Markdown concept gallery", nodes[0].heading.text[0].default);
+    try std.testing.expectEqualStrings("Setext level one", nodes[1].heading.text[0].default);
 
     try std.testing.expect(countNodes(nodes, .heading) >= 10);
     try std.testing.expectEqual(@as(usize, 3), countNodes(nodes, .horizontal_rule));

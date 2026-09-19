@@ -1,6 +1,7 @@
 //! TODO: Support UTF-8 properly, all checks atm assume ascii encoding
 
 const std = @import("std");
+const max_nesting_depth = 128;
 
 pub const Node = union(enum) {
     heading: struct {
@@ -15,6 +16,7 @@ pub const Node = union(enum) {
     code_block: struct {
         language: []const u8,
         initial_indentation: usize,
+        fence_len: usize,
         lines: std.ArrayList([]const u8),
         closed: bool,
     },
@@ -87,7 +89,6 @@ pub const Node = union(enum) {
         alignment: Alignment,
         header: []Section,
         values: [][]Section,
-        values_capacity: usize = 0,
 
         pub const Alignment = enum { left, right, center };
     };
@@ -202,6 +203,19 @@ test "whitespace-only lines are blank" {
     try expectDefaultText(nodes[1], "second");
 }
 
+test "whitespace-only lines reset block state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const table_nodes = try parse(arena.allocator(), "A | B\n--- | ---\none | two\n   \nafter | text\n", .{});
+    try std.testing.expectEqual(@as(usize, 2), table_nodes.len);
+    try std.testing.expectEqual(@as(usize, 1), table_nodes[0].table[0].values.len);
+    try expectDefaultText(table_nodes[1], "after | text");
+
+    const heading_nodes = try parse(arena.allocator(), "# heading\nparagraph\n\t\nnext\n", .{});
+    try std.testing.expect(heading_nodes[0].heading.children.items[1].* == .line_break);
+}
+
 test "setext headings" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -215,6 +229,21 @@ test "setext headings" {
     try std.testing.expect(level_two[0].* == .heading);
     try std.testing.expectEqual(@as(u8, 2), level_two[0].heading.level);
     try expectDefaultSection(level_two[0].heading.text, "subtitle");
+}
+
+test "setext headings require adjacency and follow heading hierarchy" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const separated = try parse(arena.allocator(), "title\n\n---\n", .{});
+    try std.testing.expect(separated[0].* == .text);
+    try std.testing.expect(separated[1].* == .horizontal_rule);
+
+    const siblings = try parse(arena.allocator(), "# first\nsecond\n===\n", .{});
+    try std.testing.expectEqual(@as(usize, 2), siblings.len);
+    try std.testing.expect(siblings[0].* == .heading);
+    try std.testing.expect(siblings[1].* == .heading);
+    try std.testing.expect(siblings[1].heading.parent == null);
 }
 
 test "horizontal rules recognize supported markers" {
@@ -240,6 +269,47 @@ test "fenced code blocks preserve indentation language lines and closed state" {
 
     const open = try parse(arena.allocator(), "```text\ncontent", .{});
     try std.testing.expect(!open[0].code_block.closed);
+}
+
+test "fenced code blocks preserve empty lines" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "```text\n\nfirst\n\nsecond\n\n```\n", .{});
+    const lines = nodes[0].code_block.lines.items;
+    try std.testing.expectEqual(@as(usize, 5), lines.len);
+    try std.testing.expectEqualStrings("", lines[0]);
+    try std.testing.expectEqualStrings("", lines[2]);
+    try std.testing.expectEqualStrings("", lines[4]);
+}
+
+test "fenced code blocks respect opening fence length" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "````text\ncontent\n```\nstill content\n````\n", .{});
+    const block = nodes[0].code_block;
+    try std.testing.expect(block.closed);
+    try std.testing.expectEqual(@as(usize, 4), block.fence_len);
+    try std.testing.expectEqualStrings("text", block.language);
+    try std.testing.expectEqual(@as(usize, 3), block.lines.items.len);
+    try std.testing.expectEqualStrings("```", block.lines.items[1]);
+}
+
+test "leading inline backticks remain text nodes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const single = try parse(arena.allocator(), "`code`\n", .{});
+    try std.testing.expect(single[0].text[0] == .code);
+    try std.testing.expectEqualStrings("code", single[0].text[0].code);
+
+    const double = try parse(arena.allocator(), "``code`with`ticks``\n", .{});
+    try std.testing.expect(double[0].text[0] == .code);
+    try std.testing.expectEqualStrings("code`with`ticks", double[0].text[0].code);
+
+    const unmatched = try parse(arena.allocator(), "``unterminated\n", .{});
+    try expectDefaultText(unmatched[0], "``unterminated");
 }
 
 test "block quotes contain parsed nodes and preserve nesting" {
@@ -395,6 +465,19 @@ test "short marker-like lines do not panic" {
     try std.testing.expect(nodes.len > 0);
 }
 
+test "oversized block markers and list numbers remain safe" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const hashes = "#" ** 300 ++ " heading\n";
+    const quotes = ">" ** 300 ++ " quoted\n";
+    const number = "999999999999999999999999999999999999. item\n";
+    const nodes = try parse(arena.allocator(), hashes ++ quotes ++ number, .{});
+    try expectDefaultText(nodes[0], hashes[0 .. hashes.len - 1]);
+    try std.testing.expect(nodes[1].* == .block_quote);
+    try expectDefaultText(nodes[2], number[0 .. number.len - 1]);
+}
+
 test "tables parse headers alignments and body rows" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -456,18 +539,6 @@ test "table rows pad missing cells and ignore extra cells" {
     try expectDefaultSection(columns[1].values[1], "value");
 }
 
-test "table row storage grows geometrically" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    const nodes = try parse(arena.allocator(), "A | B\n--- | ---\n1 | 2\n3 | 4\n5 | 6\n7 | 8\n9 | 10\n", .{});
-    for (nodes[0].table) |column| {
-        try std.testing.expectEqual(@as(usize, 5), column.values.len);
-        try std.testing.expect(column.values_capacity >= column.values.len);
-        try std.testing.expect(column.values_capacity < column.values.len * 2);
-    }
-}
-
 test "a non-table line ends table body parsing" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -508,7 +579,22 @@ test "table pipes respect escapes and multi-backtick code spans" {
 
     const columns = nodes[0].table;
     try std.testing.expectEqual(@as(usize, 2), columns.len);
+    try std.testing.expectEqual(@as(usize, 1), columns[0].values[0].len);
+    try std.testing.expect(columns[0].values[0][0] == .code);
+    try std.testing.expectEqualStrings("left|right", columns[0].values[0][0].code);
     try expectTextContentSections(columns[1].values[0], "trailing \\|");
+}
+
+test "unmatched backticks do not hide table separators" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    inline for (.{ "`unterminated | value", "``unterminated | value", "text ```unterminated | value" }) |row| {
+        const nodes = try parse(arena.allocator(), "A | B\n--- | ---\n" ++ row ++ "\n", .{});
+        try std.testing.expectEqual(@as(usize, 1), nodes[0].table[0].values.len);
+        try expectDefaultSection(nodes[0].table[0].values[0], row[0 .. std.mem.indexOfScalar(u8, row, '|').? - 1]);
+        try expectDefaultSection(nodes[0].table[1].values[0], "value");
+    }
 }
 
 test "block constructs interrupt table bodies" {
@@ -712,13 +798,14 @@ const Context = struct {
         block.* = inner_ctx.graph;
     }
 
-    fn appendBlockQuoteNode(ctx: *Context, arena: std.mem.Allocator, depth: u8, line: []const u8, options: Options) !void {
+    fn appendBlockQuoteNode(ctx: *Context, arena: std.mem.Allocator, depth: usize, line: []const u8, options: Options) !void {
+        const bounded_depth = @min(depth, max_nesting_depth);
         if (ctx.previous_node) |previous_node| {
             switch (previous_node.*) {
                 .block_quote => |*block_node| {
                     var i: usize = 1;
                     var n = block_node;
-                    while (i < depth) : (i += 1) {
+                    while (i < bounded_depth) : (i += 1) {
                         if (n.items.len > 0) {
                             const last = n.items[n.items.len - 1];
                             if (last.* == .block_quote) {
@@ -775,12 +862,13 @@ const Context = struct {
         line: []const u8,
         options: Options,
     ) !void {
+        const bounded_depth = @min(depth, max_nesting_depth);
         if (ctx.previous_node) |previous_node| {
             switch (previous_node.*) {
                 .list => |*list_node| {
                     var i: usize = 0;
                     var n = list_node;
-                    while (i < depth) : (i += 1) {
+                    while (i < bounded_depth) : (i += 1) {
                         if (n.items.len == 0) return try ctx.innerAppendListNode(arena, n, element_data, line, options);
                         n = &n.getLast().children;
                     }
@@ -805,12 +893,13 @@ const Context = struct {
         try ctx.appendNode(arena, node);
     }
 
-    fn appendCodeBlock(ctx: *Context, arena: std.mem.Allocator, skipped: usize, language: []const u8) !void {
+    fn appendCodeBlock(ctx: *Context, arena: std.mem.Allocator, skipped: usize, fence_len: usize, language: []const u8) !void {
         const node = try arena.create(Node);
         node.* = .{
             .code_block = .{
                 .closed = false,
                 .initial_indentation = skipped,
+                .fence_len = fence_len,
                 .language = language,
                 .lines = .empty,
             },
@@ -835,7 +924,6 @@ const Context = struct {
                 .alignment = parseTableAlignment(delimiter) orelse return false,
                 .header = try parseLineText(arena, header, options),
                 .values = &.{},
-                .values_capacity = 0,
             };
         }
 
@@ -847,14 +935,15 @@ const Context = struct {
         const cells = try splitTableRow(arena, line);
         for (columns, 0..) |*column, index| {
             const value = if (index < cells.len) try parseLineText(arena, cells[index], options) else try arena.alloc(Node.Section, 0);
-            if (column.values.len == column.values_capacity) {
-                const new_capacity = @max(column.values_capacity * 2, 1);
+            const capacity = if (column.values.len == 0) 0 else std.math.ceilPowerOfTwo(usize, column.values.len) catch unreachable;
+            if (column.values.len == capacity) {
+                const new_capacity = @max(capacity * 2, 1);
                 const values = try arena.alloc([]Node.Section, new_capacity);
                 @memcpy(values[0..column.values.len], column.values);
                 column.values = values[0..column.values.len];
-                column.values_capacity = new_capacity;
             }
-            const values = column.values.ptr[0..column.values_capacity];
+            const new_capacity = if (column.values.len == 0) 1 else std.math.ceilPowerOfTwo(usize, column.values.len + 1) catch unreachable;
+            const values = column.values.ptr[0..new_capacity];
             values[column.values.len] = value;
             column.values = values[0 .. column.values.len + 1];
         }
@@ -862,7 +951,6 @@ const Context = struct {
 
     fn containsTablePipe(line: []const u8) bool {
         var escaped = false;
-        var code_delimiter: usize = 0;
         var index: usize = 0;
         while (index < line.len) {
             const byte = line[index];
@@ -876,13 +964,12 @@ const Context = struct {
                 index += 1;
             } else if (byte == '`') {
                 const run = backtickRunLength(line, index);
-                if (code_delimiter == 0) {
-                    code_delimiter = run;
-                } else if (run == code_delimiter) {
-                    code_delimiter = 0;
+                if (findClosingBackticks(line, index + run, run)) |closing| {
+                    index = closing + run;
+                } else {
+                    index += run;
                 }
-                index += run;
-            } else if (byte == '|' and code_delimiter == 0) {
+            } else if (byte == '|') {
                 return true;
             } else {
                 index += 1;
@@ -897,9 +984,22 @@ const Context = struct {
         return end - start;
     }
 
+    fn findClosingBackticks(line: []const u8, start: usize, delimiter_len: usize) ?usize {
+        var index = start;
+        while (index < line.len) {
+            if (line[index] != '`') {
+                index += 1;
+                continue;
+            }
+            const run = backtickRunLength(line, index);
+            if (run == delimiter_len) return index;
+            index += run;
+        }
+        return null;
+    }
+
     fn isTablePipeAt(line: []const u8, target: usize) bool {
         var escaped = false;
-        var code_delimiter: usize = 0;
         var index: usize = 0;
         while (index <= target) {
             const byte = line[index];
@@ -911,14 +1011,12 @@ const Context = struct {
                 index += 1;
             } else if (byte == '`') {
                 const run = backtickRunLength(line, index);
-                if (code_delimiter == 0) {
-                    code_delimiter = run;
-                } else if (run == code_delimiter) {
-                    code_delimiter = 0;
-                }
-                index += run;
+                if (findClosingBackticks(line, index + run, run)) |closing| {
+                    if (target > index and target < closing + run) return false;
+                    index = closing + run;
+                } else index += run;
             } else {
-                if (index == target) return byte == '|' and code_delimiter == 0;
+                if (index == target) return byte == '|';
                 index += 1;
             }
         }
@@ -933,7 +1031,6 @@ const Context = struct {
 
         var cell_start = start;
         var escaped = false;
-        var code_delimiter: usize = 0;
         var index = start;
         while (index < end) {
             const byte = trimmed[index];
@@ -947,13 +1044,10 @@ const Context = struct {
                 index += 1;
             } else if (byte == '`') {
                 const run = backtickRunLength(trimmed, index);
-                if (code_delimiter == 0) {
-                    code_delimiter = run;
-                } else if (run == code_delimiter) {
-                    code_delimiter = 0;
-                }
-                index += run;
-            } else if (byte == '|' and code_delimiter == 0) {
+                if (findClosingBackticks(trimmed, index + run, run)) |closing| {
+                    index = closing + run;
+                } else index += run;
+            } else if (byte == '|') {
                 try cells.append(arena, std.mem.trim(u8, trimmed[cell_start..index], " \t"));
                 cell_start = index + 1;
                 index += 1;
@@ -1204,9 +1298,29 @@ const Context = struct {
                 reader.toss(2);
                 continue :loop reader.io_reader.takeByte() catch break :loop;
             },
-            '`', ':' => |c| {
+            '`' => {
+                const opening_start = reader.io_reader.seek - 1;
+                const delimiter_len = backtickRunLength(line, opening_start);
+                const content_start = opening_start + delimiter_len;
+                const closing = findClosingBackticks(line, content_start, delimiter_len) orelse {
+                    reader.io_reader.seek = content_start;
+                    continue :loop reader.io_reader.takeByte() catch {
+                        try arr.append(arena, makeDefaultSection(&reader));
+                        break :loop;
+                    };
+                };
+
+                if (reader.start != opening_start) {
+                    try arr.append(arena, .{ .default = reader.io_reader.buffer[reader.start..opening_start] });
+                }
+                try arr.append(arena, .{ .code = line[content_start..closing] });
+                reader.io_reader.seek = closing + delimiter_len;
+                reader.start = reader.io_reader.seek;
+                continue :loop reader.io_reader.takeByte() catch break :loop;
+            },
+            ':' => {
                 const seek_pos = reader.io_reader.seek;
-                const text = reader.io_reader.takeDelimiterExclusive(c) catch {
+                const text = reader.io_reader.takeDelimiterExclusive(':') catch {
                     const next_byte_inner = reader.io_reader.takeByte() catch {
                         try arr.append(arena, makeDefaultSection(&reader));
                         break :loop;
@@ -1218,11 +1332,7 @@ const Context = struct {
                     try arr.append(arena, .{ .default = reader.take(seek_pos - 1) });
                 }
 
-                if (c == '`') {
-                    try arr.append(arena, .{ .code = text });
-                } else {
-                    try arr.append(arena, .{ .emoji_shortcode = text });
-                }
+                try arr.append(arena, .{ .emoji_shortcode = text });
 
                 reader.toss(1);
                 continue :loop reader.io_reader.takeByte() catch break :loop;
@@ -1323,61 +1433,20 @@ const Context = struct {
     // TODO: This should use a Reader instead
     fn parseLine(ctx: *Context, arena: std.mem.Allocator, raw_line: []const u8, options: Options) std.mem.Allocator.Error!void {
         const line = if (raw_line.len > 0 and raw_line[raw_line.len - 1] == '\r') raw_line[0 .. raw_line.len - 1] else raw_line;
-        if (line.len == 0) {
-            ctx.previous_line = null;
-            if (ctx.previous_node) |node| {
-                if (node.* == .table) ctx.previous_node = null;
+        if (ctx.openCodeBlock()) |node| {
+            const block = &node.code_block;
+            const trimmed = std.mem.trimEnd(u8, line[Context.skipBlank(line)..], " \t");
+            if (trimmed.len >= block.fence_len and std.mem.allEqual(u8, trimmed, '`')) {
+                block.closed = true;
+            } else {
+                try block.lines.append(arena, line);
             }
-            if (ctx.previous_heading) |heading| {
-                if (ctx.previous_node) |node| {
-                    switch (node.*) {
-                        .text => {
-                            const new_node = try arena.create(Node);
-                            new_node.* = .line_break;
-                            ctx.previous_node = new_node;
-                            try heading.heading.children.append(arena, new_node);
-                        },
-                        else => {},
-                    }
-                }
-            }
-
             return;
         }
 
-        defer ctx.previous_line = line;
-
-        // TODO: Completely rework `previous_node`
-        if (ctx.previous_node) |node| {
-            switch (node.*) {
-                .code_block => |*block| {
-                    if (!block.closed) {
-                        if (std.mem.allEqual(u8, line[Context.skipBlank(line)..], '`')) {
-                            block.closed = true;
-                            return;
-                        }
-
-                        try block.lines.append(arena, line);
-                        return;
-                    }
-                },
-                else => {},
-            }
-        } else if (ctx.graph.items.len > 0 and ctx.graph.items[ctx.graph.items.len - 1].* == .code_block) {
-            const block = &ctx.graph.items[ctx.graph.items.len - 1].code_block;
-            if (!block.closed) {
-                if (std.mem.allEqual(u8, line[Context.skipBlank(line)..], '`')) {
-                    block.closed = true;
-                    return;
-                }
-
-                try block.lines.append(arena, line);
-                return;
-            }
-        }
-
         const skipped = skipBlank(line);
-        if (skipped == line.len) return;
+        if (skipped == line.len) return ctx.handleBlankLine(arena);
+        defer ctx.previous_line = line;
         const skipped_line = line[skipped..];
 
         if (ctx.previous_node) |previous_node| {
@@ -1391,7 +1460,7 @@ const Context = struct {
         switch (line[skipped]) {
             '#' => {
                 var pos: usize = 1;
-                var level: u8 = 1;
+                var level: usize = 1;
                 while (pos < skipped_line.len and skipped_line[pos] == '#') : (pos += 1) {
                     level += 1;
                 }
@@ -1399,22 +1468,13 @@ const Context = struct {
                 if (level > 6 or pos >= skipped_line.len or skipped_line[pos] != ' ') return ctx.appendTextNode(arena, skipped_line, options);
                 pos += 1;
 
-                return ctx.appendHeadingNode(arena, level, skipped_line[pos..], options);
+                return ctx.appendHeadingNode(arena, @intCast(level), skipped_line[pos..], options);
             },
             '=' => {
                 if (skipped_line.len > 1 and std.mem.allEqual(u8, skipped_line[1..], '=')) {
+                    if (ctx.previous_line == null) return ctx.appendTextNode(arena, skipped_line, options);
                     if (ctx.previous_node) |prev_node| switch (prev_node.*) {
-                        .text => |copy| {
-                            prev_node.* = .{
-                                .heading = .{
-                                    .id = null,
-                                    .level = 1,
-                                    .text = copy,
-                                    .parent = ctx.previous_heading,
-                                    .children = .empty,
-                                },
-                            };
-                        },
+                        .text => return ctx.convertTextToSetextHeading(arena, prev_node, 1),
                         else => return ctx.appendTextNode(arena, skipped_line, options),
                     };
                 } else return ctx.appendTextNode(arena, skipped_line, options);
@@ -1431,18 +1491,9 @@ const Context = struct {
                         options,
                     );
                 } else if (skipped_line.len > 1 and std.mem.allEqual(u8, skipped_line[1..], '-')) {
+                    if (ctx.previous_line == null) return ctx.appendHorizontalRule(arena);
                     if (ctx.previous_node) |prev_node| switch (prev_node.*) {
-                        .text => |copy| {
-                            prev_node.* = .{
-                                .heading = .{
-                                    .id = null,
-                                    .level = 2,
-                                    .text = copy,
-                                    .parent = ctx.previous_heading,
-                                    .children = .empty,
-                                },
-                            };
-                        },
+                        .text => return ctx.convertTextToSetextHeading(arena, prev_node, 2),
                         else => return ctx.appendHorizontalRule(arena),
                     } else {
                         return ctx.appendHorizontalRule(arena);
@@ -1457,11 +1508,13 @@ const Context = struct {
             },
             '`' => {
                 if (std.mem.startsWith(u8, skipped_line, "```")) {
-                    return ctx.appendCodeBlock(arena, skipped, skipped_line[3..]);
+                    const fence_len = backtickRunLength(skipped_line, 0);
+                    return ctx.appendCodeBlock(arena, skipped, fence_len, skipped_line[fence_len..]);
                 }
+                return ctx.appendTextNode(arena, skipped_line, options);
             },
             '>' => {
-                var depth: u8 = 1;
+                var depth: usize = 1;
                 while (depth < skipped_line.len and skipped_line[depth] == '>') {
                     depth += 1;
                 }
@@ -1477,9 +1530,11 @@ const Context = struct {
                 };
 
                 if (num_len + 1 < skipped_line.len and skipped_line[num_len] == '.' and skipped_line[num_len + 1] == ' ') {
+                    const number = std.fmt.parseInt(usize, skipped_line[0..num_len], 10) catch
+                        return ctx.appendTextNode(arena, skipped_line, options);
                     return try ctx.appendListNode(
                         arena,
-                        .{ .ordered = std.fmt.parseInt(usize, skipped_line[0..num_len], 10) catch unreachable },
+                        .{ .ordered = number },
                         skipped / 2,
                         skipped_line[num_len + 1 ..],
                         options,
@@ -1492,5 +1547,63 @@ const Context = struct {
                 return ctx.appendTextNode(arena, skipped_line, options);
             },
         }
+    }
+
+    fn openCodeBlock(ctx: *Context) ?*Node {
+        if (ctx.previous_node) |node| if (node.* == .code_block and !node.code_block.closed) return node;
+        if (ctx.graph.items.len > 0) {
+            const node = ctx.graph.items[ctx.graph.items.len - 1];
+            if (node.* == .code_block and !node.code_block.closed) return node;
+        }
+        return null;
+    }
+
+    fn handleBlankLine(ctx: *Context, arena: std.mem.Allocator) std.mem.Allocator.Error!void {
+        ctx.previous_line = null;
+        if (ctx.previous_node) |node| {
+            if (node.* == .table) ctx.previous_node = null;
+        }
+        if (ctx.previous_heading) |heading| {
+            if (ctx.previous_node) |node| switch (node.*) {
+                .text => {
+                    const new_node = try arena.create(Node);
+                    new_node.* = .line_break;
+                    ctx.previous_node = new_node;
+                    try heading.heading.children.append(arena, new_node);
+                },
+                else => {},
+            };
+        }
+    }
+
+    fn convertTextToSetextHeading(ctx: *Context, arena: std.mem.Allocator, node: *Node, level: u8) std.mem.Allocator.Error!void {
+        const text = node.text;
+        const old_parent = ctx.previous_heading;
+        const new_parent = findParentHadingNode(old_parent, level);
+        if (old_parent != new_parent) {
+            if (old_parent) |parent| {
+                std.debug.assert(parent.heading.children.items.len > 0);
+                std.debug.assert(parent.heading.children.items[parent.heading.children.items.len - 1] == node);
+                _ = parent.heading.children.pop().?;
+            } else {
+                std.debug.assert(ctx.graph.items.len > 0);
+                std.debug.assert(ctx.graph.items[ctx.graph.items.len - 1] == node);
+                _ = ctx.graph.pop().?;
+            }
+            if (new_parent) |parent| {
+                try parent.heading.children.append(arena, node);
+            } else {
+                try ctx.graph.append(arena, node);
+            }
+        }
+        node.* = .{ .heading = .{
+            .id = null,
+            .level = level,
+            .text = text,
+            .parent = new_parent,
+            .children = .empty,
+        } };
+        ctx.previous_heading = node;
+        ctx.previous_node = node;
     }
 };
