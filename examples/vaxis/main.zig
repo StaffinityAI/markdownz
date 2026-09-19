@@ -532,6 +532,75 @@ fn measuredTextWidth(measure: vaxis.Window, text: []const u8) usize {
     return width;
 }
 
+fn drawWrappedSegments(win: vaxis.Window, segments: []const vaxis.Segment, skipped_rows: usize, row_offset: usize) void {
+    var row = row_offset;
+    var col: usize = 0;
+    var soft_wrapped = false;
+    for (segments) |text_segment| {
+        var lines: TextLineIterator = .{ .buf = text_segment.text };
+        while (lines.next()) |line| {
+            var tokens: WordTokenizer = .{ .buf = line };
+            while (tokens.next()) |token| switch (token) {
+                .whitespace => |len| {
+                    if (soft_wrapped) continue;
+                    for (0..len) |_| {
+                        if (col >= win.width) {
+                            col = 0;
+                            row += 1;
+                            break;
+                        }
+                        writeVisibleTextCell(win, row, col, skipped_rows, " ", 1, text_segment);
+                        col += 1;
+                    }
+                },
+                .word => |word| {
+                    const width = measuredTextWidth(win, word);
+                    if (width + col > win.width and width < win.width) {
+                        row += 1;
+                        col = 0;
+                    }
+                    var graphemes = vaxis.unicode.graphemeIterator(word);
+                    while (graphemes.next()) |grapheme| {
+                        soft_wrapped = false;
+                        const bytes = grapheme.bytes(word);
+                        const grapheme_width = win.gwidth(bytes);
+                        writeVisibleTextCell(win, row, col, skipped_rows, bytes, @intCast(grapheme_width), text_segment);
+                        col += grapheme_width;
+                        if (col >= win.width) {
+                            row += 1;
+                            col = 0;
+                            soft_wrapped = true;
+                        }
+                    }
+                },
+            };
+            if (lines.has_break) {
+                soft_wrapped = false;
+                row += 1;
+                col = 0;
+            }
+        }
+    }
+}
+
+fn writeVisibleTextCell(
+    win: vaxis.Window,
+    row: usize,
+    col: usize,
+    skipped_rows: usize,
+    grapheme: []const u8,
+    width: u8,
+    text_segment: vaxis.Segment,
+) void {
+    if (row < skipped_rows or row >= skipped_rows + win.height or col >= win.width) return;
+    win.writeCell(@intCast(col), @intCast(row - skipped_rows), .{
+        .char = .{ .grapheme = grapheme, .width = width },
+        .style = text_segment.style,
+        .link = text_segment.link,
+        .wrapped = col + width >= win.width,
+    });
+}
+
 const TextLineIterator = struct {
     buf: []const u8,
     index: usize = 0,
@@ -599,29 +668,16 @@ fn drawDocument(viewport: vaxis.Window, lines: []const Line, scroll: usize) void
                 continue;
             }
 
-            if (visible_start > std.math.maxInt(i17)) {
-                document_row = line_end;
-                if (document_row >= scroll + viewport.height) break;
-                continue;
-            }
-            const line_window = viewport.child(.{
-                .y_off = @as(i17, @intCast(screen_row)) - @as(i17, @intCast(visible_start)),
-                .height = @intCast(@min(height, std.math.maxInt(u16))),
-            });
-
             switch (line.kind) {
                 .rule => drawRule(viewport, @intCast(document_row - scroll)),
                 .heading => |level| {
                     drawHeadingBackground(visible_window, level);
-                    _ = line_window.print(line.segments, .{
-                        .row_offset = if (level == 1) 1 else 0,
-                        .wrap = .word,
-                    });
-                    if (level == 2) drawHeadingDivider(line_window, height);
+                    drawWrappedSegments(visible_window, line.segments, visible_start, if (level == 1) 1 else 0);
+                    if (level == 2) drawHeadingDivider(visible_window, height, visible_start);
                 },
                 .code => {
                     visible_window.fill(.{ .char = .{ .grapheme = " " }, .style = .{ .bg = .{ .index = 0 } } });
-                    _ = line_window.print(line.segments, .{ .wrap = .word });
+                    drawWrappedSegments(visible_window, line.segments, visible_start, 0);
                 },
                 .image => |image| {
                     if (visible_start == 0 and image.image != null) {
@@ -631,7 +687,7 @@ fn drawDocument(viewport: vaxis.Window, lines: []const Line, scroll: usize) void
                     }
                 },
                 .table => unreachable,
-                .normal => _ = line_window.print(line.segments, .{ .wrap = .word }),
+                .normal => drawWrappedSegments(visible_window, line.segments, visible_start, 0),
             }
         }
         document_row = line_end;
@@ -842,9 +898,9 @@ fn drawHeadingBackground(win: vaxis.Window, level: u8) void {
     win.fill(.{ .char = .{ .grapheme = " " }, .style = style });
 }
 
-fn drawHeadingDivider(win: vaxis.Window, height: usize) void {
-    if (height == 0 or height > win.height) return;
-    const row: u16 = @intCast(height - 1);
+fn drawHeadingDivider(win: vaxis.Window, height: usize, skipped_rows: usize) void {
+    if (height == 0 or height - 1 < skipped_rows or height - 1 >= skipped_rows + win.height) return;
+    const row: u16 = @intCast(height - 1 - skipped_rows);
     var col: u16 = 0;
     while (col < win.width) : (col += 1) {
         win.writeCell(col, row, .{

@@ -17,4 +17,4 @@
 - [x] Reclaim previous DVUI parser graph generations when source or parser options change.
 - [x] Avoid repeated renderer logs for cached DVUI image failures.
 - [x] Add behavioral assertions for source replacement, image caching, and extreme Vaxis heights.
-- [ ] Render text at viewport offsets deeper than the Vaxis signed child-window range.
+- [x] Render text at viewport offsets deeper than the Vaxis signed child-window range.
