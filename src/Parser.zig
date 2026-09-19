@@ -176,6 +176,16 @@ test "blank line after heading text creates a line break" {
     try std.testing.expect(children[1].* == .line_break);
 }
 
+test "whitespace-only lines are blank" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "first\n   \n\t\nsecond\n", .{});
+    try std.testing.expectEqual(@as(usize, 2), nodes.len);
+    try expectDefaultText(nodes[0], "first");
+    try expectDefaultText(nodes[1], "second");
+}
+
 test "setext headings" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1228,6 +1238,7 @@ const Context = struct {
         }
 
         const skipped = skipBlank(line);
+        if (skipped == line.len) return;
         const skipped_line = line[skipped..];
 
         if (ctx.previous_node) |previous_node| {
