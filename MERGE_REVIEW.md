@@ -9,3 +9,11 @@
 - [x] Clean up Vaxis terminal images when loading a later image fails.
 - [x] Cache failed DVUI image loads so they are not retried and logged every frame.
 - [x] Add DVUI renderer regression tests for the fixed runtime behavior.
+
+## Final Audit Follow-ups
+
+- [ ] Invalidate cached DVUI code buffers when the source generation changes.
+- [ ] Render table rows taller than 65,535 rows without narrowing the logical height to `u16`.
+- [ ] Reclaim previous DVUI parser graph generations when source or parser options change.
+- [ ] Avoid repeated renderer logs for cached DVUI image failures.
+- [ ] Add behavioral assertions for source replacement, image caching, and extreme Vaxis heights.
