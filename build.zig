@@ -44,6 +44,26 @@ pub fn build(b: *std.Build) void {
     const run_vaxis_viewer_step = b.step("run-tui", "Run the Vaxis markdown viewer example");
 
     if (b.lazyDependency("dvui", .{
+        .target = b.graph.host,
+        .optimize = optimize,
+        .backend = .testing,
+    })) |dvui_test_dep| {
+        const widget_tests = b.addTest(.{
+            .name = "markdown-dvui-widget-tests",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("examples/dvui/widget_test.zig"),
+                .target = b.graph.host,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "markdown", .module = markdown },
+                    .{ .name = "dvui", .module = dvui_test_dep.module("dvui_testing") },
+                },
+            }),
+        });
+        test_step.dependOn(&b.addRunArtifact(widget_tests).step);
+    }
+
+    if (b.lazyDependency("dvui", .{
         .target = target,
         .optimize = optimize,
         .backend = .sdl3,

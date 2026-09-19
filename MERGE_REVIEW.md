@@ -8,4 +8,4 @@
 - [x] Expose parser options through the DVUI widget API.
 - [x] Clean up Vaxis terminal images when loading a later image fails.
 - [x] Cache failed DVUI image loads so they are not retried and logged every frame.
-- [ ] Add DVUI renderer regression tests for the fixed runtime behavior.
+- [x] Add DVUI renderer regression tests for the fixed runtime behavior.
