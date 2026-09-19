@@ -1,4 +1,6 @@
-# Remaining Merge Review Findings
+# Internal Merge Review Findings
+
+This checklist records branch-review work and is not part of the public API documentation. See `README.md` for installation, usage, supported syntax, and migration guidance.
 
 - [x] Use frame-scoped allocation for transient DVUI table rendering data.
 - [x] Clip partially visible Vaxis headings, code blocks, and images without negative child windows.
