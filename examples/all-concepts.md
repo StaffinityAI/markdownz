@@ -83,7 +83,7 @@ Special Markdown characters stay literal here: **bold** [link](url)
 
 ## Unsupported syntax
 
-Automatic URLs, subscript/superscript, alerts, footnotes, containers, HTML, general backslash escapes, and entities are currently preserved as ordinary source text rather than parsed as Markdown features. Table parsing handles escaped pipes specially so they remain inside their cells.
+Automatic URLs, subscript/superscript, alerts, footnotes, containers, HTML, general backslash escapes, and entities are not recognized as dedicated Markdown features. Supported block and inline rules may still interpret portions of that source; for example, alert-like lines are block quotes. Table parsing handles escaped pipes specially so they remain inside their cells.
 
 ## Final paragraph
 

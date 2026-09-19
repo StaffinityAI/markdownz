@@ -46,16 +46,15 @@ pub fn main(init: std.process.Init) !void {
     defer arena.deinit();
 
     const source =
-        \\# Example
-        \\
         \\A paragraph with **bold text**.
+        \\# Example
     ;
 
     const nodes = try markdown.parse(arena.allocator(), source, .{});
     for (nodes) |node| {
         switch (node.*) {
             .heading => |heading| std.debug.print("heading level {d}\n", .{heading.level}),
-            .text => std.debug.print("paragraph\n", .{}),
+            .text => std.debug.print("text line\n", .{}),
             else => {},
         }
     }
@@ -68,6 +67,7 @@ pub fn main(init: std.process.Init) !void {
 - Keep that allocator alive while reading the returned graph.
 - The graph contains slices into the original Markdown buffer. Keep the input buffer alive for at least as long as the graph.
 - An arena allocator is recommended when parsing a complete document. Deinitializing or resetting the arena releases the graph as one generation.
+- Content following a heading is attached to that heading's `children` until a same-level or higher-level heading is parsed.
 
 ## Parser Options
 
@@ -91,7 +91,7 @@ The parser currently supports:
 
 - ATX headings from level 1 through 6, including custom IDs
 - Setext headings
-- Paragraph text and blank-line separation
+- Line-oriented text nodes and blank-line separation
 - Horizontal rules
 - Fenced code blocks with optional language text
 - Block quotes
@@ -106,6 +106,8 @@ The parser currently supports:
 The public node model also reserves variants for footnotes, alerts, containers, subscript, superscript, and typographic text. Those constructs are not currently parsed as dedicated nodes. Automatic URLs, HTML, entities, and general Markdown backslash escapes are also not implemented. Table parsing does recognize escaped pipes so they remain inside a cell.
 
 Text scanning currently assumes ASCII for Markdown marker detection. UTF-8 text can be preserved in content, but full Unicode-aware parsing is not yet implemented.
+
+Quote and list nesting is capped at 128 levels so example renderers cannot exhaust the call stack on hostile input.
 
 ## Tables
 
@@ -122,33 +124,33 @@ Rows with missing cells receive empty values. Cells beyond the declared header c
 Run the graphical DVUI viewer with the built-in concept gallery:
 
 ```sh
-zig build run-gui
+zig build run-gui -Ddvui=true
 ```
 
 Run it with another Markdown file:
 
 ```sh
-zig build run-gui -- path/to/document.md
+zig build run-gui -Ddvui=true -- path/to/document.md
 ```
 
 Run the Vaxis terminal viewer:
 
 ```sh
-zig build run-tui -- path/to/document.md
+zig build run-tui -Dvaxis=true -- path/to/document.md
 ```
 
 Build the viewers without running them:
 
 ```sh
-zig build dvui-viewer
-zig build vaxis-viewer
+zig build dvui-viewer -Ddvui=true
+zig build vaxis-viewer -Dvaxis=true
 ```
 
-DVUI and Vaxis are lazy dependencies used only by their examples and renderer tests.
+DVUI and Vaxis are optional dependencies. Parser-only consumers do not request either dependency. Enable them explicitly with `-Ddvui=true` or `-Dvaxis=true`; DVUI also provides the legacy `lib` compatibility module.
 
 ## Testing
 
-Run the native parser and renderer tests:
+Run the native parser and concept-fixture tests:
 
 ```sh
 zig build test
@@ -166,6 +168,12 @@ Compile parser tests for another target without attempting to execute foreign bi
 zig build test-compile -Dtarget=x86_64-linux-gnu
 ```
 
+Run optional renderer tests with:
+
+```sh
+zig build test -Ddvui=true -Dvaxis=true
+```
+
 ## Migration From `dvui_markdown`
 
 The package is now parser-first and uses the package name `markdown`.
@@ -177,4 +185,13 @@ The package is now parser-first and uses the package name `markdown`.
 | `lib.Parser.Node` | `markdown.Node` |
 | `lib.MarkdownWidget` | Optional legacy DVUI compatibility API through `module("lib")` |
 
-The `lib` compatibility module requires the optional DVUI dependency and is retained for existing consumers. New parser-only integrations should use the `markdown` module directly.
+The `lib` compatibility module requires the optional DVUI dependency and is retained for existing consumers. Consumers requesting it must enable the dependency option when configuring this package. New parser-only integrations should use the `markdown` module directly.
+
+```zig
+const markdown_dep = b.dependency("markdown", .{
+    .target = target,
+    .optimize = optimize,
+    .dvui = true,
+});
+const legacy = markdown_dep.module("lib");
+```
