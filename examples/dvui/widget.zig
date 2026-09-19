@@ -397,8 +397,8 @@ pub const Renderer = struct {
 
                     const image_size = dvui.imageSize(image_source) catch {
                         std.log.info("Image size could not be gathered, assuming default size", .{});
-                        // TODO: Implement placeholder
-                        return;
+                        iterateSections(tl, dvui_opts, image.alt_text, url, options);
+                        continue;
                     };
 
                     var image_options: dvui.Options = .{
