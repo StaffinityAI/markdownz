@@ -23,11 +23,23 @@ const ImageRef = struct {
     path: []const u8,
 };
 
+const TableColumn = struct {
+    alignment: markdown.Node.Column.Alignment,
+    header: []const vaxis.Segment,
+    values: []const []const vaxis.Segment,
+};
+
+const TableBlock = struct {
+    columns: []const TableColumn,
+    row_count: usize,
+};
+
 const LineKind = union(enum) {
     normal,
     heading: u8,
     code,
     image: ImageBlock,
+    table: TableBlock,
     rule,
 };
 
@@ -97,7 +109,7 @@ const Renderer = struct {
             },
             .list => |list| try self.renderList(list, 0, quote_depth),
             .block_quote => |nodes_in_quote| try self.render(nodes_in_quote.items, quote_depth + 1),
-            .table => try self.addTextLine("[table]", .{ .dim = true }),
+            .table => |columns| try self.renderTable(columns),
             .footnote => |sections| {
                 var segments: std.ArrayList(vaxis.Segment) = .empty;
                 try self.appendPrefix(&segments, quote_depth, "[^] ");
@@ -127,6 +139,38 @@ const Renderer = struct {
             try self.addLine(&segments, 0, .normal);
             try self.renderList(element.children, depth + 1, quote_depth);
         }
+    }
+
+    fn renderTable(self: *Renderer, columns: []markdown.Node.Column) !void {
+        if (columns.len == 0) return;
+
+        const rendered_columns = try self.allocator.alloc(TableColumn, columns.len);
+        var row_count: usize = 0;
+        for (rendered_columns, columns) |*rendered, column| {
+            const header = try self.renderSections(column.header, .{ .bold = true, .fg = .{ .index = 15 }, .bg = .{ .index = 4 } });
+            const values = try self.allocator.alloc([]const vaxis.Segment, column.values.len);
+            for (values, column.values) |*value, sections| {
+                value.* = try self.renderSections(sections, .{});
+            }
+            rendered.* = .{
+                .alignment = column.alignment,
+                .header = header,
+                .values = values,
+            };
+            row_count = @max(row_count, values.len);
+        }
+
+        try self.document.lines.append(self.allocator, .{
+            .segments = &.{},
+            .gap_before = 1,
+            .kind = .{ .table = .{ .columns = rendered_columns, .row_count = row_count } },
+        });
+    }
+
+    fn renderSections(self: *Renderer, sections: []markdown.Node.Section, style: vaxis.Style) ![]const vaxis.Segment {
+        var segments: std.ArrayList(vaxis.Segment) = .empty;
+        try self.appendSections(&segments, sections, style, null);
+        return segments.toOwnedSlice(self.allocator);
     }
 
     fn appendPrefix(self: *Renderer, segments: *std.ArrayList(vaxis.Segment), quote_depth: usize, suffix: []const u8) !void {
@@ -394,12 +438,37 @@ fn lineHeight(measure: vaxis.Window, line: Line) usize {
         .rule => 1,
         .normal, .code => measuredLineHeight(measure, line.segments),
         .image => 14,
+        .table => |table| tableHeight(measure, table),
         .heading => |level| measuredLineHeight(measure, line.segments) + @as(usize, switch (level) {
             1 => 2,
             2 => 1,
             else => 0,
         }),
     };
+}
+
+fn tableHeight(measure: vaxis.Window, table: TableBlock) usize {
+    if (table.columns.len == 0) return 0;
+    if (measure.width < table.columns.len * 4 + 1) return 1;
+    const widths = tableColumnWidths(measure.width, table.columns.len);
+    var height: usize = 2;
+    height += tableRowHeight(measure, table, widths, null);
+    for (0..table.row_count) |row| height += tableRowHeight(measure, table, widths, row) + 1;
+    return height;
+}
+
+fn tableRowHeight(measure: vaxis.Window, table: TableBlock, widths: TableWidths, row: ?usize) usize {
+    var height: usize = 1;
+    for (table.columns, 0..) |column, index| {
+        const segments = if (row) |row_index|
+            if (row_index < column.values.len) column.values[row_index] else &.{}
+        else
+            column.header;
+        const cell_width = widths.width(index) -| 2;
+        const cell_window = measure.child(.{ .width = cell_width, .height = std.math.maxInt(u16) });
+        height = @max(height, measuredLineHeight(cell_window, segments));
+    }
+    return height;
 }
 
 fn measuredLineHeight(measure: vaxis.Window, segments: []const vaxis.Segment) usize {
@@ -443,12 +512,147 @@ fn drawDocument(viewport: vaxis.Window, lines: []const Line, scroll: usize) void
                         drawImageFallback(line_window, line.segments);
                     }
                 },
+                .table => |table| drawTable(line_window, table),
                 .normal => _ = line_window.print(line.segments, .{ .wrap = .word }),
             }
         }
         document_row = line_end;
         if (document_row >= scroll + viewport.height) break;
     }
+}
+
+const TableWidths = struct {
+    total: u16,
+    columns: usize,
+    base: u16,
+    remainder: u16,
+
+    fn width(self: TableWidths, index: usize) u16 {
+        return self.base + @intFromBool(index < self.remainder);
+    }
+
+    fn offset(self: TableWidths, index: usize) u16 {
+        return @intCast(index * self.base + @min(index, self.remainder));
+    }
+};
+
+fn tableColumnWidths(total_width: u16, columns: usize) TableWidths {
+    const inner_width = total_width -| @as(u16, @intCast(columns + 1));
+    return .{
+        .total = total_width,
+        .columns = columns,
+        .base = @max(inner_width / @as(u16, @intCast(columns)), 3),
+        .remainder = inner_width % @as(u16, @intCast(columns)),
+    };
+}
+
+fn drawTable(win: vaxis.Window, table: TableBlock) void {
+    if (table.columns.len == 0 or win.width < table.columns.len * 4 + 1) {
+        _ = win.printSegment(.{ .text = "[table too wide for terminal]", .style = .{ .dim = true } }, .{ .wrap = .none });
+        return;
+    }
+
+    const widths = tableColumnWidths(win.width, table.columns.len);
+    var row: u16 = 0;
+    drawTableBorder(win, row, widths, .top);
+    row += 1;
+    row += drawTableRow(win, row, table, widths, null, true);
+    drawTableBorder(win, row, widths, .middle);
+    row += 1;
+    for (0..table.row_count) |row_index| {
+        row += drawTableRow(win, row, table, widths, row_index, false);
+        drawTableBorder(win, row, widths, if (row_index + 1 == table.row_count) .bottom else .middle);
+        row += 1;
+    }
+}
+
+fn drawTableRow(
+    win: vaxis.Window,
+    row: u16,
+    table: TableBlock,
+    widths: TableWidths,
+    row_index: ?usize,
+    header: bool,
+) u16 {
+    const height: u16 = @intCast(tableRowHeight(win, table, widths, row_index));
+    const fill_style: vaxis.Style = if (header)
+        .{ .fg = .{ .index = 15 }, .bg = .{ .index = 4 }, .bold = true }
+    else if (row_index.? % 2 == 1)
+        .{ .bg = .{ .index = 0 } }
+    else
+        .{};
+
+    for (0..height) |line| {
+        win.writeCell(0, row + @as(u16, @intCast(line)), tableBorderCell("│"));
+        for (table.columns, 0..) |_, index| {
+            const cell_x = widths.offset(index) + @as(u16, @intCast(index + 1));
+            const cell_width = widths.width(index);
+            win.writeCell(cell_x + cell_width, row + @as(u16, @intCast(line)), tableBorderCell("│"));
+        }
+    }
+
+    for (table.columns, 0..) |column, index| {
+        const cell_x = widths.offset(index) + @as(u16, @intCast(index + 1));
+        const cell_width = widths.width(index);
+        const cell = win.child(.{
+            .x_off = @intCast(cell_x),
+            .y_off = @intCast(row),
+            .width = cell_width,
+            .height = height,
+        });
+        cell.fill(.{ .char = .{ .grapheme = " " }, .style = fill_style });
+
+        const segments = if (row_index) |value_index|
+            if (value_index < column.values.len) column.values[value_index] else &.{}
+        else
+            column.header;
+        const content_width = cell_width -| 2;
+        const content = cell.child(.{ .x_off = 1, .width = content_width, .height = height });
+        const text_height = measuredLineHeight(content, segments);
+        const col_offset = tableTextOffset(content, segments, text_height, column.alignment);
+        _ = content.print(segments, .{ .col_offset = col_offset, .wrap = .word });
+    }
+    return height;
+}
+
+fn tableTextOffset(
+    win: vaxis.Window,
+    segments: []const vaxis.Segment,
+    text_height: usize,
+    alignment: markdown.Node.Column.Alignment,
+) u16 {
+    if (text_height != 1 or alignment == .left) return 0;
+    const result = win.print(segments, .{ .wrap = .none, .commit = false });
+    const remaining = win.width -| result.col;
+    return switch (alignment) {
+        .left => 0,
+        .center => remaining / 2,
+        .right => remaining,
+    };
+}
+
+fn drawTableBorder(win: vaxis.Window, row: u16, widths: TableWidths, kind: enum { top, middle, bottom }) void {
+    if (row >= win.height) return;
+    const left: []const u8, const join: []const u8, const right: []const u8 = switch (kind) {
+        .top => .{ "┌", "┬", "┐" },
+        .middle => .{ "├", "┼", "┤" },
+        .bottom => .{ "└", "┴", "┘" },
+    };
+    win.writeCell(0, row, tableBorderCell(left));
+    for (0..widths.columns) |index| {
+        const start = widths.offset(index) + @as(u16, @intCast(index + 1));
+        for (0..widths.width(index)) |offset| {
+            win.writeCell(start + @as(u16, @intCast(offset)), row, tableBorderCell("─"));
+        }
+        win.writeCell(start + widths.width(index), row, tableBorderCell(if (index + 1 == widths.columns) right else join));
+    }
+}
+
+fn tableBorderCell(grapheme: []const u8) vaxis.Cell {
+    return .{
+        .char = .{ .grapheme = grapheme },
+        .style = .{ .fg = .{ .index = 8 } },
+    };
 }
 
 fn drawRule(viewport: vaxis.Window, row: u16) void {
