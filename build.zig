@@ -34,6 +34,9 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run parser tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
     test_step.dependOn(&b.addRunArtifact(fixture_tests).step);
+    const test_compile_step = b.step("test-compile", "Compile parser tests for the selected target");
+    test_compile_step.dependOn(&tests.step);
+    test_compile_step.dependOn(&fixture_tests.step);
 
     const viewer_step = b.step("dvui-viewer", "Build the DVUI markdown viewer example");
     const run_viewer_step = b.step("run-gui", "Run the DVUI markdown viewer example");
