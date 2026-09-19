@@ -131,7 +131,7 @@ pub const Renderer = struct {
                             try arr.append(gpa, '\n');
                         }
 
-                        _ = arr.pop();
+                        if (arr.items.len > 0) _ = arr.pop();
 
                         buffer = try arr.toOwnedSlice(gpa);
                         dvui.dataSet(null, id, "__buffer", buffer.?);
