@@ -16,4 +16,4 @@
 - [x] Render table rows taller than 65,535 rows without narrowing the logical height to `u16`.
 - [x] Reclaim previous DVUI parser graph generations when source or parser options change.
 - [x] Avoid repeated renderer logs for cached DVUI image failures.
-- [ ] Add behavioral assertions for source replacement, image caching, and extreme Vaxis heights.
+- [x] Add behavioral assertions for source replacement, image caching, and extreme Vaxis heights.

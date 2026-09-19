@@ -64,7 +64,7 @@ pub fn init(src: std.builtin.SourceLocation, arena: *std.heap.ArenaAllocator, fi
         dvui.dataSet(null, graph_id, "__graph", cached.?);
     }
 
-    try Renderer.init(arena.child_allocator, cached.?.graph, cached.?.generation, options);
+    try Renderer.init(arena.allocator(), cached.?.graph, cached.?.generation, options);
 }
 
 fn parserOptionsHash(options: Parser.Options) u8 {

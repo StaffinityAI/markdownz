@@ -17,6 +17,13 @@ fn renderFrame() !dvui.App.Result {
     return .ok;
 }
 
+fn renderHash() !u64 {
+    dvui.testing.widget_hasher = .init();
+    defer dvui.testing.widget_hasher = null;
+    _ = try dvui.testing.step(renderFrame);
+    return dvui.testing.widget_hasher.?.final();
+}
+
 test "renderer handles edge cases across frames and source changes" {
     var testing = try dvui.testing.init(.{ .window_size = .{ .w = 800, .h = 600 } });
     defer testing.deinit();
@@ -41,7 +48,15 @@ test "renderer handles edge cases across frames and source changes" {
         \\__underline__
     ;
     try dvui.testing.settle(renderFrame);
+    const original_hash = try renderHash();
 
-    test_source = "replacement document";
+    test_source = "```\nreplacement code\n```\n";
     try dvui.testing.settle(renderFrame);
+    const replacement_hash = try renderHash();
+    try std.testing.expect(original_hash != replacement_hash);
+
+    test_source = "__parser option content__";
+    try dvui.testing.settle(renderFrame);
+    const underline_hash = try renderHash();
+    try std.testing.expect(replacement_hash != underline_hash);
 }

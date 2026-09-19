@@ -498,7 +498,7 @@ fn measuredLineHeight(measure: vaxis.Window, segments: []const vaxis.Segment) us
                     }
                 },
                 .word => |word| {
-                    const width = measure.gwidth(word);
+                    const width = measuredTextWidth(measure, word);
                     if (width + col > measure.width and width < measure.width) {
                         row += 1;
                         col = 0;
@@ -523,6 +523,13 @@ fn measuredLineHeight(measure: vaxis.Window, segments: []const vaxis.Segment) us
         }
     }
     return @max(row + @intFromBool(col > 0), 1);
+}
+
+fn measuredTextWidth(measure: vaxis.Window, text: []const u8) usize {
+    var width: usize = 0;
+    var graphemes = vaxis.unicode.graphemeIterator(text);
+    while (graphemes.next()) |grapheme| width += measure.gwidth(grapheme.bytes(text));
+    return width;
 }
 
 const TextLineIterator = struct {
@@ -912,6 +919,22 @@ fn segment(text: []const u8, style: vaxis.Style, link: ?[]const u8) vaxis.Segmen
         .style = style,
         .link = if (link) |uri| .{ .uri = uri } else .{},
     };
+}
+
+test "line measurement exceeds u16 row limits" {
+    var screen = try vaxis.Screen.init(std.testing.allocator, .{
+        .rows = 1,
+        .cols = 1,
+        .x_pixel = 1,
+        .y_pixel = 1,
+    });
+    defer screen.deinit(std.testing.allocator);
+    var vx: vaxis.Vaxis = undefined;
+    vx.screen = screen;
+    const text = try std.testing.allocator.alloc(u8, 70_000);
+    defer std.testing.allocator.free(text);
+    @memset(text, 'a');
+    try std.testing.expect(measuredLineHeight(vx.window(), &.{.{ .text = text }}) > std.math.maxInt(u16));
 }
 
 fn applyBackground(segments: []vaxis.Segment, background: vaxis.Color) void {

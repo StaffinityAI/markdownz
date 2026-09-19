@@ -19,6 +19,7 @@ var image_cache: std.StringHashMapUnmanaged(CachedImage) = .empty;
 var image_arena: std.mem.Allocator = undefined;
 var app_io: std.Io = undefined;
 var using_default_document = false;
+var image_load_attempts: usize = 0;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -130,6 +131,7 @@ fn imageSource(path_or_url: []const u8, cached: CachedImage) dvui.Texture.ImageS
 }
 
 fn loadImage(path_or_url: []const u8) ![]const u8 {
+    image_load_attempts += 1;
     if (using_default_document and std.mem.eql(u8, path_or_url, default_document.image_name)) {
         return default_document.image;
     }
@@ -149,4 +151,16 @@ fn loadImage(path_or_url: []const u8) ![]const u8 {
         .limited(max_image_size),
     );
     return bytes;
+}
+
+test "failed image loads are cached" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    image_arena = arena.allocator();
+    image_cache = .empty;
+    image_load_attempts = 0;
+
+    _ = getImage("https://example.invalid/missing.png");
+    _ = getImage("https://example.invalid/missing.png");
+    try std.testing.expectEqual(@as(usize, 1), image_load_attempts);
 }

@@ -95,6 +95,12 @@ pub fn build(b: *std.Build) void {
 
         viewer_step.dependOn(&viewer.step);
 
+        const viewer_tests = b.addTest(.{
+            .name = "markdown-dvui-viewer-tests",
+            .root_module = viewer.root_module,
+        });
+        test_step.dependOn(&b.addRunArtifact(viewer_tests).step);
+
         const run_viewer = b.addRunArtifact(viewer);
         if (b.args) |args| run_viewer.addArgs(args);
         run_viewer_step.dependOn(&run_viewer.step);
@@ -119,6 +125,12 @@ pub fn build(b: *std.Build) void {
         });
 
         vaxis_viewer_step.dependOn(&vaxis_viewer.step);
+
+        const vaxis_tests = b.addTest(.{
+            .name = "markdown-vaxis-viewer-tests",
+            .root_module = vaxis_viewer.root_module,
+        });
+        test_step.dependOn(&b.addRunArtifact(vaxis_tests).step);
 
         const run_vaxis_viewer = b.addRunArtifact(vaxis_viewer);
         if (b.args) |args| run_vaxis_viewer.addArgs(args);
