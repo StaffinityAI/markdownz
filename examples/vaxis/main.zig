@@ -475,9 +475,98 @@ fn tableRowHeight(measure: vaxis.Window, table: TableBlock, widths: TableWidths,
 
 fn measuredLineHeight(measure: vaxis.Window, segments: []const vaxis.Segment) usize {
     if (segments.len == 0) return 1;
-    const result = measure.print(segments, .{ .wrap = .word, .commit = false });
-    return @max(@as(usize, result.row) + @intFromBool(result.col > 0), 1);
+    var row: usize = 0;
+    var col: usize = 0;
+    var soft_wrapped = false;
+    for (segments) |text_segment| {
+        var lines: TextLineIterator = .{ .buf = text_segment.text };
+        while (lines.next()) |line| {
+            var tokens: WordTokenizer = .{ .buf = line };
+            while (tokens.next()) |token| switch (token) {
+                .whitespace => |len| {
+                    if (soft_wrapped) continue;
+                    for (0..len) |_| {
+                        if (col >= measure.width) {
+                            col = 0;
+                            row += 1;
+                            break;
+                        }
+                        col += 1;
+                    }
+                },
+                .word => |word| {
+                    const width = measure.gwidth(word);
+                    if (width + col > measure.width and width < measure.width) {
+                        row += 1;
+                        col = 0;
+                    }
+                    var graphemes = vaxis.unicode.graphemeIterator(word);
+                    while (graphemes.next()) |grapheme| {
+                        soft_wrapped = false;
+                        col += measure.gwidth(grapheme.bytes(word));
+                        if (col >= measure.width) {
+                            row += 1;
+                            col = 0;
+                            soft_wrapped = true;
+                        }
+                    }
+                },
+            };
+            if (lines.has_break) {
+                soft_wrapped = false;
+                row += 1;
+                col = 0;
+            }
+        }
+    }
+    return @max(row + @intFromBool(col > 0), 1);
 }
+
+const TextLineIterator = struct {
+    buf: []const u8,
+    index: usize = 0,
+    has_break: bool = true,
+
+    fn next(self: *TextLineIterator) ?[]const u8 {
+        if (self.index >= self.buf.len) return null;
+        const start = self.index;
+        const end = std.mem.indexOfAnyPos(u8, self.buf, self.index, "\r\n") orelse {
+            if (start == 0) self.has_break = false;
+            self.index = self.buf.len;
+            return self.buf[start..];
+        };
+        self.index = end;
+        if (self.index < self.buf.len and self.buf[self.index] == '\r') self.index += 1;
+        if (self.index < self.buf.len and self.buf[self.index] == '\n') self.index += 1;
+        return self.buf[start..end];
+    }
+};
+
+const WordTokenizer = struct {
+    buf: []const u8,
+    index: usize = 0,
+
+    const Token = union(enum) {
+        whitespace: usize,
+        word: []const u8,
+    };
+
+    fn next(self: *WordTokenizer) ?Token {
+        if (self.index >= self.buf.len) return null;
+        if (self.buf[self.index] == ' ' or self.buf[self.index] == '\t') {
+            var len: usize = 0;
+            while (self.index < self.buf.len) : (self.index += 1) switch (self.buf[self.index]) {
+                ' ' => len += 1,
+                '\t' => len += 8,
+                else => break,
+            };
+            return .{ .whitespace = len };
+        }
+        const start = self.index;
+        while (self.index < self.buf.len and self.buf[self.index] != ' ' and self.buf[self.index] != '\t') : (self.index += 1) {}
+        return .{ .word = self.buf[start..self.index] };
+    }
+};
 
 fn drawDocument(viewport: vaxis.Window, lines: []const Line, scroll: usize) void {
     var document_row: usize = 0;
