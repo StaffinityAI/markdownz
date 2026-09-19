@@ -87,6 +87,7 @@ pub const Node = union(enum) {
         alignment: Alignment,
         header: []Section,
         values: [][]Section,
+        values_capacity: usize = 0,
 
         pub const Alignment = enum { left, right, center };
     };
@@ -453,6 +454,18 @@ test "table rows pad missing cells and ignore extra cells" {
     try expectDefaultSection(columns[0].values[0], "one");
     try std.testing.expectEqual(@as(usize, 0), columns[1].values[0].len);
     try expectDefaultSection(columns[1].values[1], "value");
+}
+
+test "table row storage grows geometrically" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "A | B\n--- | ---\n1 | 2\n3 | 4\n5 | 6\n7 | 8\n9 | 10\n", .{});
+    for (nodes[0].table) |column| {
+        try std.testing.expectEqual(@as(usize, 5), column.values.len);
+        try std.testing.expect(column.values_capacity >= column.values.len);
+        try std.testing.expect(column.values_capacity < column.values.len * 2);
+    }
 }
 
 test "a non-table line ends table body parsing" {
@@ -822,6 +835,7 @@ const Context = struct {
                 .alignment = parseTableAlignment(delimiter) orelse return false,
                 .header = try parseLineText(arena, header, options),
                 .values = &.{},
+                .values_capacity = 0,
             };
         }
 
@@ -833,10 +847,16 @@ const Context = struct {
         const cells = try splitTableRow(arena, line);
         for (columns, 0..) |*column, index| {
             const value = if (index < cells.len) try parseLineText(arena, cells[index], options) else try arena.alloc(Node.Section, 0);
-            const values = try arena.alloc([]Node.Section, column.values.len + 1);
-            @memcpy(values[0..column.values.len], column.values);
+            if (column.values.len == column.values_capacity) {
+                const new_capacity = @max(column.values_capacity * 2, 1);
+                const values = try arena.alloc([]Node.Section, new_capacity);
+                @memcpy(values[0..column.values.len], column.values);
+                column.values = values[0..column.values.len];
+                column.values_capacity = new_capacity;
+            }
+            const values = column.values.ptr[0..column.values_capacity];
             values[column.values.len] = value;
-            column.values = values;
+            column.values = values[0 .. column.values.len + 1];
         }
     }
 
