@@ -1,17 +1,19 @@
 .{
-    .name = .dvui_markdown,
+    .name = .markdown,
     .version = "0.0.1",
-    .fingerprint = 0xf6b9da7823c1cfe2,
+    .fingerprint = 0x96be88e357d44907,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .dvui = .{
             .url = "git+https://github.com/david-vanderson/dvui#5f3f394d78382c434d7c5b152ce476833db542de",
             .hash = "dvui-0.5.0-dev-AQFJmVEc9gBhhgP3p8dN09veUHczWd-6-wo22tahQFdJ",
+            .lazy = true,
         },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "examples",
         "src",
     },
 }

@@ -1,7 +1,7 @@
 const dvui = @import("dvui");
 const std = @import("std");
 
-const Parser = @import("./Parser.zig");
+const Parser = @import("markdown");
 
 const MarkdownWidget = @This();
 
