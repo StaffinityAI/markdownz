@@ -306,13 +306,16 @@ pub fn main(init: std.process.Init) !void {
 
     try vx.enterAltScreen(tty.writer());
     try vx.queryTerminal(tty.writer(), .fromSeconds(1));
-    try loadDocumentImages(
+    loadDocumentImages(
         &document,
         &vx,
         tty.writer(),
         init.gpa,
         if (args.len == 2) std.fs.path.dirname(args[1]) orelse "." else null,
-    );
+    ) catch |err| {
+        freeDocumentImages(document.lines.items, vx, tty.writer());
+        return err;
+    };
     defer freeDocumentImages(document.lines.items, vx, tty.writer());
 
     const title = if (args.len == 2) std.fs.path.basename(args[1]) else "Markdown concepts";

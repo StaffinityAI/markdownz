@@ -6,6 +6,6 @@
 - [x] Invalidate the DVUI parser graph cache when the Markdown source or parser options change.
 - [x] Preserve line breaks when rendering unclosed fenced code blocks in DVUI.
 - [x] Expose parser options through the DVUI widget API.
-- [ ] Clean up Vaxis terminal images when loading a later image fails.
+- [x] Clean up Vaxis terminal images when loading a later image fails.
 - [ ] Cache failed DVUI image loads so they are not retried and logged every frame.
 - [ ] Add DVUI renderer regression tests for the fixed runtime behavior.
