@@ -483,6 +483,32 @@ test "escaped and code-span pipes do not split table cells" {
     try std.testing.expectEqualStrings("a|b", columns[1].values[0][0].code);
 }
 
+test "table pipes respect escapes and multi-backtick code spans" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(),
+        \\Expression | Meaning
+        \\--- | ---
+        \\``left|right`` | trailing \|
+    , .{});
+
+    const columns = nodes[0].table;
+    try std.testing.expectEqual(@as(usize, 2), columns.len);
+    try expectTextContentSections(columns[1].values[0], "trailing \\|");
+}
+
+test "block constructs interrupt table bodies" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "A | B\n--- | ---\none | two\n# Heading | suffix\n", .{});
+    try std.testing.expectEqual(@as(usize, 2), nodes.len);
+    try std.testing.expect(nodes[0].* == .table);
+    try std.testing.expect(nodes[1].* == .heading);
+    try expectDefaultSection(nodes[1].heading.text, "Heading | suffix");
+}
+
 test "blank lines terminate table body parsing" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -816,18 +842,64 @@ const Context = struct {
 
     fn containsTablePipe(line: []const u8) bool {
         var escaped = false;
-        var code = false;
-        for (line) |byte| {
+        var code_delimiter: usize = 0;
+        var index: usize = 0;
+        while (index < line.len) {
+            const byte = line[index];
             if (escaped) {
                 escaped = false;
+                index += 1;
                 continue;
             }
             if (byte == '\\') {
                 escaped = true;
+                index += 1;
             } else if (byte == '`') {
-                code = !code;
-            } else if (byte == '|' and !code) {
+                const run = backtickRunLength(line, index);
+                if (code_delimiter == 0) {
+                    code_delimiter = run;
+                } else if (run == code_delimiter) {
+                    code_delimiter = 0;
+                }
+                index += run;
+            } else if (byte == '|' and code_delimiter == 0) {
                 return true;
+            } else {
+                index += 1;
+            }
+        }
+        return false;
+    }
+
+    fn backtickRunLength(line: []const u8, start: usize) usize {
+        var end = start + 1;
+        while (end < line.len and line[end] == '`') : (end += 1) {}
+        return end - start;
+    }
+
+    fn isTablePipeAt(line: []const u8, target: usize) bool {
+        var escaped = false;
+        var code_delimiter: usize = 0;
+        var index: usize = 0;
+        while (index <= target) {
+            const byte = line[index];
+            if (escaped) {
+                escaped = false;
+                index += 1;
+            } else if (byte == '\\') {
+                escaped = true;
+                index += 1;
+            } else if (byte == '`') {
+                const run = backtickRunLength(line, index);
+                if (code_delimiter == 0) {
+                    code_delimiter = run;
+                } else if (run == code_delimiter) {
+                    code_delimiter = 0;
+                }
+                index += run;
+            } else {
+                if (index == target) return byte == '|' and code_delimiter == 0;
+                index += 1;
             }
         }
         return false;
@@ -837,25 +909,36 @@ const Context = struct {
         var cells: std.ArrayList([]const u8) = .empty;
         const trimmed = std.mem.trim(u8, line, " \t");
         const start: usize = @intFromBool(trimmed.len > 0 and trimmed[0] == '|');
-        const end = trimmed.len - @intFromBool(trimmed.len > start and trimmed[trimmed.len - 1] == '|');
+        const end = trimmed.len - @intFromBool(trimmed.len > start and isTablePipeAt(trimmed, trimmed.len - 1));
 
         var cell_start = start;
         var escaped = false;
-        var code = false;
+        var code_delimiter: usize = 0;
         var index = start;
-        while (index < end) : (index += 1) {
+        while (index < end) {
             const byte = trimmed[index];
             if (escaped) {
                 escaped = false;
+                index += 1;
                 continue;
             }
             if (byte == '\\') {
                 escaped = true;
+                index += 1;
             } else if (byte == '`') {
-                code = !code;
-            } else if (byte == '|' and !code) {
+                const run = backtickRunLength(trimmed, index);
+                if (code_delimiter == 0) {
+                    code_delimiter = run;
+                } else if (run == code_delimiter) {
+                    code_delimiter = 0;
+                }
+                index += run;
+            } else if (byte == '|' and code_delimiter == 0) {
                 try cells.append(arena, std.mem.trim(u8, trimmed[cell_start..index], " \t"));
                 cell_start = index + 1;
+                index += 1;
+            } else {
+                index += 1;
             }
         }
         try cells.append(arena, std.mem.trim(u8, trimmed[cell_start..end], " \t"));
@@ -869,6 +952,28 @@ const Context = struct {
         const dashes = cell[@intFromBool(left) .. cell.len - @intFromBool(right)];
         if (dashes.len < 3 or !std.mem.allEqual(u8, dashes, '-')) return null;
         return if (left and right) .center else if (right) .right else .left;
+    }
+
+    fn startsBlock(line: []const u8) bool {
+        if (line.len == 0) return false;
+        switch (line[0]) {
+            '#' => {
+                var count: usize = 0;
+                while (count < line.len and line[count] == '#') : (count += 1) {}
+                return count <= 6 and count < line.len and line[count] == ' ';
+            },
+            '>' => return true,
+            '`' => return std.mem.startsWith(u8, line, "```"),
+            '-', '*', '_' => |marker| {
+                return (line.len > 1 and line[1] == ' ') or std.mem.allEqual(u8, line, marker);
+            },
+            '0'...'9' => {
+                var index: usize = 1;
+                while (index < line.len and std.ascii.isDigit(line[index])) : (index += 1) {}
+                return index + 1 < line.len and line[index] == '.' and line[index + 1] == ' ';
+            },
+            else => return false,
+        }
     }
 
     fn appendTextNode(ctx: *Context, arena: std.mem.Allocator, line: []const u8, options: Options) !void {
@@ -1256,7 +1361,7 @@ const Context = struct {
         const skipped_line = line[skipped..];
 
         if (ctx.previous_node) |previous_node| {
-            if (previous_node.* == .table and containsTablePipe(skipped_line)) {
+            if (previous_node.* == .table and !startsBlock(skipped_line) and containsTablePipe(skipped_line)) {
                 return appendTableRow(arena, previous_node.table, skipped_line, options);
             }
         }
