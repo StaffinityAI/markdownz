@@ -174,7 +174,10 @@ pub const Renderer = struct {
                 .list => |list| {
                     self.renderList(list, 0, options);
                 },
-                .table => {},
+                .table => |columns| {
+                    self.deinitTextLayout();
+                    try self.renderTable(gpa, columns, options);
+                },
                 .footnote => {},
                 .alert => {},
                 .container => {},
@@ -213,6 +216,84 @@ pub const Renderer = struct {
             iterateSections(tl, .{ .font = dvui.themeGet().font_body }, element.text, null, options);
             renderList(self, element.children, iter + 1, options);
         }
+    }
+
+    fn renderTable(self: *Renderer, gpa: std.mem.Allocator, columns: []Parser.Node.Column, options: InitOptions) !void {
+        _ = self;
+        if (columns.len == 0) return;
+
+        const col_widths = try gpa.alloc(f32, columns.len);
+        defer gpa.free(col_widths);
+
+        var grid = dvui.grid(
+            @src(),
+            .colWidths(col_widths),
+            .{ .row_height_variable = true },
+            .{
+                .expand = .horizontal,
+                .margin = .{ .y = 8, .h = 8 },
+                .border = .all(1),
+                .corner_radius = .all(4),
+            },
+        );
+        defer grid.deinit();
+
+        const available_width = grid.data().contentRect().w - dvui.GridWidget.scrollbar_padding_defaults.w;
+        const column_width = @max(available_width / @as(f32, @floatFromInt(columns.len)), 140);
+        @memset(col_widths, column_width);
+
+        const border_color = dvui.themeGet().border;
+        const header_fill = dvui.themeGet().color(.control, .fill);
+        const alternate_fill = dvui.themeGet().color(.control, .fill_press);
+
+        for (columns, 0..) |column, column_index| {
+            var cell = grid.headerCell(@src(), column_index, .{
+                .background = true,
+                .color_fill = header_fill,
+                .color_border = border_color,
+                .border = .all(0.5),
+                .padding = .all(8),
+            });
+            defer cell.deinit();
+
+            var tl = dvui.textLayout(@src(), .{}, .{
+                .expand = .horizontal,
+                .gravity_x = tableGravity(column.alignment),
+            });
+            iterateSections(tl, .{ .font = dvui.themeGet().font_body.withWeight(.bold) }, column.header, null, options);
+            tl.deinit();
+        }
+
+        const row_count = columns[0].values.len;
+        for (0..row_count) |row_index| {
+            for (columns, 0..) |column, column_index| {
+                var cell = grid.bodyCell(@src(), .colRow(column_index, row_index), .{
+                    .background = true,
+                    .color_fill = if (row_index % 2 == 0) null else alternate_fill,
+                    .color_border = border_color,
+                    .border = .all(0.5),
+                    .padding = .all(8),
+                });
+                defer cell.deinit();
+
+                var tl = dvui.textLayout(@src(), .{}, .{
+                    .expand = .horizontal,
+                    .gravity_x = tableGravity(column.alignment),
+                });
+                if (row_index < column.values.len) {
+                    iterateSections(tl, .{ .font = dvui.themeGet().font_body }, column.values[row_index], null, options);
+                }
+                tl.deinit();
+            }
+        }
+    }
+
+    fn tableGravity(alignment: Parser.Node.Column.Alignment) f32 {
+        return switch (alignment) {
+            .left => 0,
+            .center => 0.5,
+            .right => 1,
+        };
     }
 
     fn checkbox(src: std.builtin.SourceLocation, target: bool, opts: dvui.Options) void {
