@@ -111,6 +111,21 @@ test "CRLF preserves the final character" {
     try expectDefaultText(nodes[1], "second");
 }
 
+test "CRLF blank lines reset block state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const table_nodes = try parse(arena.allocator(), "A | B\r\n--- | ---\r\none | two\r\n\r\nafter | text\r\n", .{});
+    try std.testing.expectEqual(@as(usize, 2), table_nodes.len);
+    try std.testing.expect(table_nodes[0].* == .table);
+    try expectDefaultText(table_nodes[1], "after | text");
+
+    const heading_nodes = try parse(arena.allocator(), "# heading\r\nparagraph\r\n\r\nnext\r\n", .{});
+    const children = heading_nodes[0].heading.children.items;
+    try std.testing.expectEqual(@as(usize, 3), children.len);
+    try std.testing.expect(children[1].* == .line_break);
+}
+
 test "ATX headings support all levels and custom ids" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1182,7 +1197,8 @@ const Context = struct {
 
     // TODO: This should use a Reader instead
     fn parseLine(ctx: *Context, arena: std.mem.Allocator, raw_line: []const u8, options: Options) std.mem.Allocator.Error!void {
-        if (raw_line.len == 0) {
+        const line = if (raw_line.len > 0 and raw_line[raw_line.len - 1] == '\r') raw_line[0 .. raw_line.len - 1] else raw_line;
+        if (line.len == 0) {
             ctx.previous_line = null;
             if (ctx.previous_node) |node| {
                 if (node.* == .table) ctx.previous_node = null;
@@ -1204,8 +1220,6 @@ const Context = struct {
             return;
         }
 
-        const line = if (raw_line[raw_line.len - 1] == '\r') raw_line[0 .. raw_line.len - 1] else raw_line;
-        if (line.len == 0) return;
         defer ctx.previous_line = line;
 
         // TODO: Completely rework `previous_node`
