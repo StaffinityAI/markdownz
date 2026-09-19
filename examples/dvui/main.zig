@@ -1,11 +1,12 @@
 const std = @import("std");
+const default_document = @import("default_document");
 const dvui = @import("dvui");
 const SDLBackend = @import("sdl-backend");
 const MarkdownWidget = @import("widget.zig");
 
 const max_markdown_size = 64 * 1024 * 1024;
 const max_image_size = 64 * 1024 * 1024;
-const default_markdown = @embedFile("all-concepts.md");
+const default_markdown = default_document.source;
 const default_title: [:0]const u8 = "Markdown concepts";
 
 var markdown_source: []const u8 = &.{};

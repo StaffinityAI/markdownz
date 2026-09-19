@@ -9,6 +9,11 @@
             .hash = "dvui-0.5.0-dev-AQFJmVEc9gBhhgP3p8dN09veUHczWd-6-wo22tahQFdJ",
             .lazy = true,
         },
+        .vaxis = .{
+            .url = "git+https://github.com/rockorager/libvaxis#f37c42a3b324131c131d066767968e1f5b976453",
+            .hash = "vaxis-0.6.0-BWNV_AIQDADLTDo5jCn27pBWJBvi-sTrSkSKwITQWgUV",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",
