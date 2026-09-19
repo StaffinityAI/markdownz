@@ -12,6 +12,11 @@ const CachedGraph = struct {
     graph: []*Parser.Node,
 };
 
+const CachedCodeBuffer = struct {
+    content_hash: u64,
+    buffer: []u8,
+};
+
 pub const InitOptions = struct {
     parser: Parser.Options = .{},
     /// Used for Code Block rendering
@@ -144,8 +149,9 @@ pub const Renderer = struct {
 
                     const id = dvui.parentGet().extendId(@src(), 0);
 
-                    var buffer = dvui.dataGet(null, id, "__buffer", []u8);
-                    if (buffer == null) {
+                    const content_hash = codeBlockHash(block.language, block.lines.items);
+                    var cached_buffer = dvui.dataGet(null, id, "__buffer", CachedCodeBuffer);
+                    if (cached_buffer == null or cached_buffer.?.content_hash != content_hash) {
                         var arr: std.ArrayList(u8) = try .initCapacity(gpa, block.lines.items.len * 20);
 
                         for (block.lines.items) |line| {
@@ -155,14 +161,17 @@ pub const Renderer = struct {
 
                         if (arr.items.len > 0) _ = arr.pop();
 
-                        buffer = try arr.toOwnedSlice(gpa);
-                        dvui.dataSet(null, id, "__buffer", buffer.?);
+                        cached_buffer = .{
+                            .content_hash = content_hash,
+                            .buffer = try arr.toOwnedSlice(gpa),
+                        };
+                        dvui.dataSet(null, id, "__buffer", cached_buffer.?);
                     }
 
                     var te: dvui.TextEntryWidget = undefined;
                     te.init(@src(), .{
                         .multiline = true,
-                        .text = .{ .buffer = buffer.? },
+                        .text = .{ .buffer = cached_buffer.?.buffer },
                         .tree_sitter = options.tree_sitter,
                     }, .{
                         .background = true,
@@ -205,6 +214,16 @@ pub const Renderer = struct {
                 .container => {},
             }
         }
+    }
+
+    fn codeBlockHash(language: []const u8, lines: []const []const u8) u64 {
+        var hash = std.hash.Wyhash.init(0);
+        hash.update(language);
+        for (lines) |line| {
+            hash.update(line);
+            hash.update("\n");
+        }
+        return hash.final();
     }
 
     fn renderList(self: *Renderer, list: std.ArrayList(*Parser.Node.Element), iter: usize, options: InitOptions) void {

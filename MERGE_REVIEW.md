@@ -12,7 +12,7 @@
 
 ## Final Audit Follow-ups
 
-- [ ] Invalidate cached DVUI code buffers when the source generation changes.
+- [x] Invalidate cached DVUI code buffers when the source generation changes.
 - [ ] Render table rows taller than 65,535 rows without narrowing the logical height to `u16`.
 - [ ] Reclaim previous DVUI parser graph generations when source or parser options change.
 - [ ] Avoid repeated renderer logs for cached DVUI image failures.
