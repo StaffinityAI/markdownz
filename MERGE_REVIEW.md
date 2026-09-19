@@ -7,5 +7,5 @@
 - [x] Preserve line breaks when rendering unclosed fenced code blocks in DVUI.
 - [x] Expose parser options through the DVUI widget API.
 - [x] Clean up Vaxis terminal images when loading a later image fails.
-- [ ] Cache failed DVUI image loads so they are not retried and logged every frame.
+- [x] Cache failed DVUI image loads so they are not retried and logged every frame.
 - [ ] Add DVUI renderer regression tests for the fixed runtime behavior.

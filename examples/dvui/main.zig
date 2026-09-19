@@ -11,7 +11,11 @@ const default_title: [:0]const u8 = "Markdown concepts";
 
 var markdown_source: []const u8 = &.{};
 var markdown_dir: []const u8 = ".";
-var image_cache: std.StringHashMapUnmanaged([]const u8) = .empty;
+const CachedImage = union(enum) {
+    loaded: []const u8,
+    failed,
+};
+var image_cache: std.StringHashMapUnmanaged(CachedImage) = .empty;
 var image_arena: std.mem.Allocator = undefined;
 var app_io: std.Io = undefined;
 var using_default_document = false;
@@ -105,11 +109,23 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn getImage(path_or_url: []const u8) dvui.Texture.ImageSource {
-    const bytes = image_cache.get(path_or_url) orelse loadImage(path_or_url) catch |err| {
+    if (image_cache.get(path_or_url)) |cached| return imageSource(path_or_url, cached);
+
+    const bytes = loadImage(path_or_url) catch |err| {
         std.log.warn("unable to load image '{s}': {s}", .{ path_or_url, @errorName(err) });
-        return .{ .imageFile = .{ .bytes = &.{}, .name = path_or_url } };
+        image_cache.put(image_arena, image_arena.dupe(u8, path_or_url) catch return imageSource(path_or_url, .failed), .failed) catch {};
+        return imageSource(path_or_url, .failed);
     };
 
+    image_cache.put(image_arena, image_arena.dupe(u8, path_or_url) catch return imageSource(path_or_url, .{ .loaded = bytes }), .{ .loaded = bytes }) catch {};
+    return imageSource(path_or_url, .{ .loaded = bytes });
+}
+
+fn imageSource(path_or_url: []const u8, cached: CachedImage) dvui.Texture.ImageSource {
+    const bytes = switch (cached) {
+        .loaded => |loaded| loaded,
+        .failed => &.{},
+    };
     return .{ .imageFile = .{ .bytes = bytes, .name = path_or_url } };
 }
 
@@ -132,6 +148,5 @@ fn loadImage(path_or_url: []const u8) ![]const u8 {
         image_arena,
         .limited(max_image_size),
     );
-    try image_cache.put(image_arena, try image_arena.dupe(u8, path_or_url), bytes);
     return bytes;
 }
