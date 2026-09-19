@@ -200,13 +200,14 @@ test "horizontal rules recognize supported markers" {
     for (nodes) |node| try std.testing.expect(node.* == .horizontal_rule);
 }
 
-test "fenced code blocks preserve language lines and closed state" {
+test "fenced code blocks preserve indentation language lines and closed state" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const closed = try parse(arena.allocator(), "```zig\nconst x = 1;\n```\n", .{});
+    const closed = try parse(arena.allocator(), "  ```zig extra\nconst x = 1;\n  ```\n", .{});
     try std.testing.expect(closed[0].* == .code_block);
-    try std.testing.expectEqualStrings("zig", closed[0].code_block.language);
+    try std.testing.expectEqual(@as(usize, 2), closed[0].code_block.initial_indentation);
+    try std.testing.expectEqualStrings("zig extra", closed[0].code_block.language);
     try std.testing.expectEqual(@as(usize, 1), closed[0].code_block.lines.items.len);
     try std.testing.expectEqualStrings("const x = 1;", closed[0].code_block.lines.items[0]);
     try std.testing.expect(closed[0].code_block.closed);
@@ -215,18 +216,21 @@ test "fenced code blocks preserve language lines and closed state" {
     try std.testing.expect(!open[0].code_block.closed);
 }
 
-test "block quotes contain parsed nodes" {
+test "block quotes contain parsed nodes and preserve nesting" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const nodes = try parse(arena.allocator(), "> quoted **text**\n", .{});
+    const nodes = try parse(arena.allocator(), "> quoted **text**\n>> nested\n", .{});
     try std.testing.expectEqual(@as(usize, 1), nodes.len);
     try std.testing.expect(nodes[0].* == .block_quote);
-    try std.testing.expectEqual(@as(usize, 1), nodes[0].block_quote.items.len);
+    try std.testing.expectEqual(@as(usize, 2), nodes[0].block_quote.items.len);
     const text = nodes[0].block_quote.items[0];
     try std.testing.expect(text.* == .text);
     try std.testing.expectEqual(@as(usize, 2), text.text.len);
     try std.testing.expect(text.text[1] == .bold);
+    const nested = nodes[0].block_quote.items[1];
+    try std.testing.expect(nested.* == .block_quote);
+    try expectDefaultText(nested.block_quote.items[0], "nested");
 }
 
 test "unordered ordered and task lists" {
@@ -257,15 +261,18 @@ test "nested lists use two-space indentation" {
     try std.testing.expectEqual(@as(usize, 1), parent.children.items[0].children.items.len);
 }
 
-test "inline emphasis concepts" {
+test "inline emphasis concepts support asterisk and underscore markers" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const nodes = try parse(arena.allocator(), "*italic* **bold** ***both*** ~~strike~~ ==mark== `code` :sparkles:\n", .{});
+    const nodes = try parse(arena.allocator(), "*italic* _italic_ **bold** __bold__ ***both*** ___both___ ~~strike~~ ==mark== `code` :sparkles:\n", .{});
     const sections = nodes[0].text;
     try expectSectionTag(sections, .italic);
+    try std.testing.expectEqual(@as(usize, 2), countSectionTag(sections, .italic));
     try expectSectionTag(sections, .bold);
+    try std.testing.expectEqual(@as(usize, 2), countSectionTag(sections, .bold));
     try expectSectionTag(sections, .bold_italic);
+    try std.testing.expectEqual(@as(usize, 2), countSectionTag(sections, .bold_italic));
     try expectSectionTag(sections, .strike_through);
     try expectSectionTag(sections, .highlight);
     try expectSectionTag(sections, .code);
@@ -330,16 +337,19 @@ test "images parse alt text path and hover text" {
     try std.testing.expect(image.size == null);
 }
 
-test "loose link mode trims padding while strict mode rejects it" {
+test "loose link mode trims padding while strict mode rejects links and images" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const loose = try parse(arena.allocator(), "[link](  /path  )", .{});
+    const loose = try parse(arena.allocator(), "[**link**](  /path  ) ![alt](  image.png  )", .{});
     try std.testing.expect(loose[0].text[0] == .link);
+    try std.testing.expect(loose[0].text[0].link.title[0] == .bold);
     try std.testing.expectEqualStrings("/path", loose[0].text[0].link.url);
+    try std.testing.expect(loose[0].text[2] == .image);
+    try std.testing.expectEqualStrings("image.png", loose[0].text[2].image.path);
 
-    const strict = try parse(arena.allocator(), "[link](  /path  )", .{ .mode = .strict });
-    try expectDefaultText(strict[0], "[link](  /path  )");
+    const strict = try parse(arena.allocator(), "[link](  /path  ) ![alt](  image.png  )", .{ .mode = .strict });
+    try expectDefaultText(strict[0], "[link](  /path  ) ![alt](  image.png  )");
 }
 
 test "malformed inline syntax falls back to text" {
@@ -521,10 +531,16 @@ fn expectTextContentSections(sections: []Node.Section, expected: []const u8) !vo
 }
 
 fn expectSectionTag(sections: []Node.Section, expected: std.meta.Tag(Node.Section)) !void {
-    for (sections) |section| {
-        if (std.meta.activeTag(section) == expected) return;
-    }
+    if (countSectionTag(sections, expected) > 0) return;
     return error.TestExpectedEqual;
+}
+
+fn countSectionTag(sections: []Node.Section, expected: std.meta.Tag(Node.Section)) usize {
+    var count: usize = 0;
+    for (sections) |section| {
+        if (std.meta.activeTag(section) == expected) count += 1;
+    }
+    return count;
 }
 
 pub const Options = struct {
@@ -639,9 +655,18 @@ const Context = struct {
                     var i: usize = 1;
                     var n = block_node;
                     while (i < depth) : (i += 1) {
-                        if (n.items.len == 0) return try ctx.innerAppendBlockQuoteNode(arena, n, line, options);
-                        const b = n.items[n.items.len - 1];
-                        if (b.* == .block_quote) n = &b.block_quote;
+                        if (n.items.len > 0) {
+                            const last = n.items[n.items.len - 1];
+                            if (last.* == .block_quote) {
+                                n = &last.block_quote;
+                                continue;
+                            }
+                        }
+
+                        const nested = try arena.create(Node);
+                        nested.* = .{ .block_quote = .empty };
+                        try n.append(arena, nested);
+                        n = &nested.block_quote;
                     }
 
                     return try ctx.innerAppendBlockQuoteNode(arena, n, line, options);

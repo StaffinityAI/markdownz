@@ -1,6 +1,6 @@
 # Markdown concept gallery
 
-This document exercises the standalone Markdown parser and its example renderers. Pass a file path on the command line to view another document.
+This document exercises the supported Markdown parser features and its example renderers. Pass a file path on the command line to view another document.
 
 ## Headings
 
@@ -10,7 +10,7 @@ This document exercises the standalone Markdown parser and its example renderers
 
 ##### Level five
 
-###### Level six
+###### Level six {level-six}
 
 Setext level one
 ================
@@ -20,25 +20,19 @@ Setext level two
 
 ## Inline formatting
 
-Plain text, *italic text*, **bold text**, ***bold italic text***, ~~struck text~~, ==highlighted text==, `inline code`, and :sparkles: emoji shortcode syntax.
+Plain text, *asterisk italic*, _underscore italic_, **asterisk bold**, __underscore bold__, ***asterisk bold italic***, ___underscore bold italic___, ~~struck text~~, ==highlighted text==, `inline code`, and :sparkles: emoji shortcode syntax.
 
 The parser also recognizes __underline extension syntax__ when its underline option is enabled.
 
-Subscript syntax H~2~O and superscript syntax 2^10^ are included for feature tracking.
-
 ## Links and images
 
-[A link to the Zig website](https://ziglang.org/ "Zig programming language") and an automatic-looking URL: https://example.com/path?q=markdown
-
-![Markdown rendered across graphical and terminal interfaces](markdown.png "One parser, multiple renderers")
+[A **formatted** link title](https://ziglang.org/ "Zig programming language") and ![an *inline-formatted* image description](markdown.png "One parser, multiple renderers").
 
 ## Block quotes
 
 > A block quote can contain **formatted text**.
 > Another quoted line follows it.
-
-> [!NOTE]
-> Alert-style block quote syntax is represented here too.
+>> Nested block quote content.
 
 ## Lists
 
@@ -82,31 +76,14 @@ Special Markdown characters stay literal here: **bold** [link](url)
 
 | Feature | Status | Notes |
 | :--- | :---: | ---: |
-| Headings | Supported | Six levels |
-| Tables | Planned | Included for feature tracking |
+| Headings | Supported | Six levels and custom IDs |
+| Tables | Supported | Alignment and inline formatting |
+| Escaped \| pipe | `a|b` | Pipes remain in their cells |
+| Missing value | | Empty cells are padded |
 
-## Footnotes
+## Unsupported syntax
 
-This sentence contains a footnote reference.[^viewer]
-
-[^viewer]: Footnote definitions are included for feature tracking.
-
-## Containers
-
-::: details
-Custom container content is included for feature tracking.
-:::
-
-## HTML
-
-<details>
-<summary>Embedded HTML example</summary>
-HTML is preserved as source text by parsers that do not interpret it.
-</details>
-
-## Escapes and entities
-
-Escaped-looking punctuation: \\*not italic\\*, \\[not a link\\], and entities such as &amp;, &copy;, and &#8482;.
+Automatic URLs, subscript/superscript, alerts, footnotes, containers, HTML, escapes, and entities are currently preserved as ordinary source text rather than parsed as Markdown features.
 
 ## Final paragraph
 
