@@ -706,24 +706,22 @@ fn drawVisibleTableRow(
     const row_end = document_row + height;
     if (row_end <= visible_start or document_row >= visible_start + win.height) return;
     const skipped = visible_start -| document_row;
-    if (skipped > std.math.maxInt(i17)) return;
     const screen_row = document_row -| visible_start;
     const row_window = win.child(.{
-        .y_off = @as(i17, @intCast(screen_row)) - @as(i17, @intCast(skipped)),
-        .height = @intCast(@min(height, std.math.maxInt(u16))),
+        .y_off = @intCast(screen_row),
+        .height = @intCast(@min(height - skipped, win.height - screen_row)),
     });
-    _ = drawTableRow(row_window, 0, table, widths, row_index, header);
+    drawTableRow(row_window, table, widths, row_index, header, skipped);
 }
 
 fn drawTableRow(
     win: vaxis.Window,
-    row: u16,
     table: TableBlock,
     widths: TableWidths,
     row_index: ?usize,
     header: bool,
-) u16 {
-    const height: u16 = @intCast(tableRowHeight(win, table, widths, row_index));
+    skipped: usize,
+) void {
     const fill_style: vaxis.Style = if (header)
         .{ .fg = .{ .index = 15 }, .bg = .{ .index = 4 }, .bold = true }
     else if (row_index.? % 2 == 1)
@@ -731,12 +729,12 @@ fn drawTableRow(
     else
         .{};
 
-    for (0..height) |line| {
-        win.writeCell(0, row + @as(u16, @intCast(line)), tableBorderCell("│"));
+    for (0..win.height) |line| {
+        win.writeCell(0, @intCast(line), tableBorderCell("│"));
         for (table.columns, 0..) |_, index| {
             const cell_x = widths.offset(index) + @as(u16, @intCast(index + 1));
             const cell_width = widths.width(index);
-            win.writeCell(cell_x + cell_width, row + @as(u16, @intCast(line)), tableBorderCell("│"));
+            win.writeCell(cell_x + cell_width, @intCast(line), tableBorderCell("│"));
         }
     }
 
@@ -745,9 +743,8 @@ fn drawTableRow(
         const cell_width = widths.width(index);
         const cell = win.child(.{
             .x_off = @intCast(cell_x),
-            .y_off = @intCast(row),
             .width = cell_width,
-            .height = height,
+            .height = win.height,
         });
         cell.fill(.{ .char = .{ .grapheme = " " }, .style = fill_style });
 
@@ -756,12 +753,17 @@ fn drawTableRow(
         else
             column.header;
         const content_width = cell_width -| 2;
-        const content = cell.child(.{ .x_off = 1, .width = content_width, .height = height });
+        if (skipped > std.math.maxInt(i17)) continue;
+        const content = cell.child(.{
+            .x_off = 1,
+            .y_off = -@as(i17, @intCast(skipped)),
+            .width = content_width,
+            .height = @intCast(@min(skipped + win.height, std.math.maxInt(u16))),
+        });
         const text_height = measuredLineHeight(content, segments);
         const col_offset = tableTextOffset(content, segments, text_height, column.alignment);
         _ = content.print(segments, .{ .col_offset = col_offset, .wrap = .word });
     }
-    return height;
 }
 
 fn tableTextOffset(
