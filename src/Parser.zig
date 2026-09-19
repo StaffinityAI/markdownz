@@ -90,6 +90,315 @@ pub const Node = union(enum) {
     };
 };
 
+test "plain text and UTF-8 BOM" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "\xEF\xBB\xBFhello", .{});
+    try std.testing.expectEqual(@as(usize, 1), nodes.len);
+    try expectDefaultText(nodes[0], "hello");
+}
+
+test "CRLF preserves the final character" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "first\r\nsecond\r\n", .{});
+    try std.testing.expectEqual(@as(usize, 2), nodes.len);
+    try expectDefaultText(nodes[0], "first");
+    try expectDefaultText(nodes[1], "second");
+}
+
+test "ATX headings support all levels and custom ids" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(),
+        \\# one
+        \\## two
+        \\### three
+        \\#### four
+        \\##### five
+        \\###### six {custom-id}
+    , .{});
+
+    try std.testing.expectEqual(@as(usize, 1), nodes.len);
+    var node = nodes[0];
+    for (1..7) |level| {
+        try std.testing.expect(node.* == .heading);
+        try std.testing.expectEqual(@as(u8, @intCast(level)), node.heading.level);
+        if (level == 6) {
+            try std.testing.expectEqualStrings("custom-id", node.heading.id.?);
+            try expectDefaultSection(node.heading.text, "six");
+        } else {
+            try std.testing.expectEqual(@as(usize, 1), node.heading.children.items.len);
+            node = node.heading.children.items[0];
+        }
+    }
+}
+
+test "same-level headings are siblings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "# first\n# second\n", .{});
+    try std.testing.expectEqual(@as(usize, 2), nodes.len);
+    try std.testing.expect(nodes[0].* == .heading);
+    try std.testing.expect(nodes[1].* == .heading);
+    try std.testing.expect(nodes[0].heading.parent == null);
+    try std.testing.expect(nodes[1].heading.parent == null);
+}
+
+test "content belongs to its nearest heading" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "# parent\nintro\n## child\ndetail\n", .{});
+    try std.testing.expectEqual(@as(usize, 1), nodes.len);
+    try std.testing.expectEqual(@as(usize, 2), nodes[0].heading.children.items.len);
+    try expectDefaultText(nodes[0].heading.children.items[0], "intro");
+    const child = nodes[0].heading.children.items[1];
+    try std.testing.expect(child.* == .heading);
+    try std.testing.expect(child.heading.parent == nodes[0]);
+    try std.testing.expectEqual(@as(usize, 1), child.heading.children.items.len);
+    try expectDefaultText(child.heading.children.items[0], "detail");
+}
+
+test "blank line after heading text creates a line break" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "# heading\nparagraph\n\nnext\n", .{});
+    const children = nodes[0].heading.children.items;
+    try std.testing.expectEqual(@as(usize, 3), children.len);
+    try std.testing.expect(children[1].* == .line_break);
+}
+
+test "setext headings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const level_one = try parse(arena.allocator(), "title\n=====\n", .{});
+    try std.testing.expect(level_one[0].* == .heading);
+    try std.testing.expectEqual(@as(u8, 1), level_one[0].heading.level);
+    try expectDefaultSection(level_one[0].heading.text, "title");
+
+    const level_two = try parse(arena.allocator(), "subtitle\n-----\n", .{});
+    try std.testing.expect(level_two[0].* == .heading);
+    try std.testing.expectEqual(@as(u8, 2), level_two[0].heading.level);
+    try expectDefaultSection(level_two[0].heading.text, "subtitle");
+}
+
+test "horizontal rules recognize supported markers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "---\n***\n___\n", .{});
+    try std.testing.expectEqual(@as(usize, 3), nodes.len);
+    for (nodes) |node| try std.testing.expect(node.* == .horizontal_rule);
+}
+
+test "fenced code blocks preserve language lines and closed state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const closed = try parse(arena.allocator(), "```zig\nconst x = 1;\n```\n", .{});
+    try std.testing.expect(closed[0].* == .code_block);
+    try std.testing.expectEqualStrings("zig", closed[0].code_block.language);
+    try std.testing.expectEqual(@as(usize, 1), closed[0].code_block.lines.items.len);
+    try std.testing.expectEqualStrings("const x = 1;", closed[0].code_block.lines.items[0]);
+    try std.testing.expect(closed[0].code_block.closed);
+
+    const open = try parse(arena.allocator(), "```text\ncontent", .{});
+    try std.testing.expect(!open[0].code_block.closed);
+}
+
+test "block quotes contain parsed nodes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "> quoted **text**\n", .{});
+    try std.testing.expectEqual(@as(usize, 1), nodes.len);
+    try std.testing.expect(nodes[0].* == .block_quote);
+    try std.testing.expectEqual(@as(usize, 1), nodes[0].block_quote.items.len);
+    const text = nodes[0].block_quote.items[0];
+    try std.testing.expect(text.* == .text);
+    try std.testing.expectEqual(@as(usize, 2), text.text.len);
+    try std.testing.expect(text.text[1] == .bold);
+}
+
+test "unordered ordered and task lists" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const unordered = try parse(arena.allocator(), "- one\n- two\n", .{});
+    try std.testing.expect(unordered[0].* == .list);
+    try std.testing.expectEqual(@as(usize, 2), unordered[0].list.items.len);
+    try std.testing.expect(unordered[0].list.items[0].data == .unordered);
+
+    const ordered = try parse(arena.allocator(), "3. three\n4. four\n", .{});
+    try std.testing.expectEqual(@as(usize, 3), ordered[0].list.items[0].data.ordered);
+    try std.testing.expectEqual(@as(usize, 4), ordered[0].list.items[1].data.ordered);
+
+    const tasks = try parse(arena.allocator(), "- [x] done\n- [ ] pending\n", .{});
+    try std.testing.expect(tasks[0].list.items[0].data.task);
+    try std.testing.expect(!tasks[0].list.items[1].data.task);
+}
+
+test "nested lists use two-space indentation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "- parent\n  - child\n    - grandchild\n", .{});
+    const parent = nodes[0].list.items[0];
+    try std.testing.expectEqual(@as(usize, 1), parent.children.items.len);
+    try std.testing.expectEqual(@as(usize, 1), parent.children.items[0].children.items.len);
+}
+
+test "inline emphasis concepts" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "*italic* **bold** ***both*** ~~strike~~ ==mark== `code` :sparkles:\n", .{});
+    const sections = nodes[0].text;
+    try expectSectionTag(sections, .italic);
+    try expectSectionTag(sections, .bold);
+    try expectSectionTag(sections, .bold_italic);
+    try expectSectionTag(sections, .strike_through);
+    try expectSectionTag(sections, .highlight);
+    try expectSectionTag(sections, .code);
+    try expectSectionTag(sections, .emoji_shortcode);
+}
+
+test "inline styles can nest" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "**bold and *italic***", .{});
+    try std.testing.expect(nodes[0].text[0] == .bold);
+    try expectSectionTag(nodes[0].text[0].bold, .italic);
+}
+
+test "underline extension changes double underscore semantics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const bold = try parse(arena.allocator(), "__text__", .{});
+    try std.testing.expect(bold[0].text[0] == .bold);
+
+    const underline = try parse(arena.allocator(), "__text__", .{ .underline_extension = true });
+    try std.testing.expect(underline[0].text[0] == .underline);
+}
+
+test "links parse title URL and hover text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "before [Zig](https://ziglang.org/ \"home\") after", .{});
+    try std.testing.expectEqual(@as(usize, 3), nodes[0].text.len);
+    const link = nodes[0].text[1].link;
+    try expectDefaultSection(link.title, "Zig");
+    try std.testing.expectEqualStrings("https://ziglang.org/", link.url);
+    try std.testing.expectEqualStrings("home", link.hover_text);
+}
+
+test "links and images can omit hover text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const link_nodes = try parse(arena.allocator(), "[title](/docs)", .{});
+    try std.testing.expectEqualStrings("/docs", link_nodes[0].text[0].link.url);
+    try std.testing.expectEqual(@as(usize, 0), link_nodes[0].text[0].link.hover_text.len);
+
+    const image_nodes = try parse(arena.allocator(), "![alt](image.png)", .{});
+    try std.testing.expectEqualStrings("image.png", image_nodes[0].text[0].image.path);
+    try std.testing.expectEqual(@as(usize, 0), image_nodes[0].text[0].image.hover_text.len);
+}
+
+test "images parse alt text path and hover text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "![alt **text**](image.png \"preview\")", .{});
+    const image = nodes[0].text[0].image;
+    try std.testing.expectEqualStrings("image.png", image.path);
+    try std.testing.expectEqualStrings("preview", image.hover_text);
+    try std.testing.expectEqual(@as(usize, 2), image.alt_text.len);
+    try std.testing.expect(image.alt_text[1] == .bold);
+    try std.testing.expect(image.size == null);
+}
+
+test "loose link mode trims padding while strict mode rejects it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const loose = try parse(arena.allocator(), "[link](  /path  )", .{});
+    try std.testing.expect(loose[0].text[0] == .link);
+    try std.testing.expectEqualStrings("/path", loose[0].text[0].link.url);
+
+    const strict = try parse(arena.allocator(), "[link](  /path  )", .{ .mode = .strict });
+    try expectDefaultText(strict[0], "[link](  /path  )");
+}
+
+test "malformed inline syntax falls back to text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "unclosed **bold and [link](", .{});
+    try std.testing.expect(nodes[0].* == .text);
+    try std.testing.expect(nodes[0].text.len > 0);
+}
+
+test "short marker-like lines do not panic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "#\n-\n1\n=\n>\n", .{});
+    try std.testing.expect(nodes.len > 0);
+}
+
+test "unimplemented block concepts remain available as text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "| table | row |\n[^note]: footnote\n<em>html</em>\n", .{});
+    try std.testing.expectEqual(@as(usize, 3), nodes.len);
+    try expectTextContent(nodes[0], "| table | row |");
+    try std.testing.expect(nodes[1].* == .text);
+    try expectTextContent(nodes[2], "<em>html</em>");
+}
+
+fn expectDefaultText(node: *Node, expected: []const u8) !void {
+    try std.testing.expect(node.* == .text);
+    try expectDefaultSection(node.text, expected);
+}
+
+fn expectDefaultSection(sections: []Node.Section, expected: []const u8) !void {
+    try std.testing.expectEqual(@as(usize, 1), sections.len);
+    try std.testing.expect(sections[0] == .default);
+    try std.testing.expectEqualStrings(expected, sections[0].default);
+}
+
+fn expectTextContent(node: *Node, expected: []const u8) !void {
+    try std.testing.expect(node.* == .text);
+    var offset: usize = 0;
+    for (node.text) |section| {
+        try std.testing.expect(section == .default);
+        const text = section.default;
+        try std.testing.expect(offset + text.len <= expected.len);
+        try std.testing.expectEqualStrings(expected[offset .. offset + text.len], text);
+        offset += text.len;
+    }
+    try std.testing.expectEqual(expected.len, offset);
+}
+
+fn expectSectionTag(sections: []Node.Section, expected: std.meta.Tag(Node.Section)) !void {
+    for (sections) |section| {
+        if (std.meta.activeTag(section) == expected) return;
+    }
+    return error.TestExpectedEqual;
+}
+
 pub const Options = struct {
     mode: enum(u1) {
         /// Allow padding on contained elements
@@ -139,15 +448,15 @@ const Context = struct {
 
     fn skipBlank(line: []const u8) usize {
         var i: usize = 0;
-        while (std.ascii.isWhitespace(line[i])) : (i += 1) {}
+        while (i < line.len and std.ascii.isWhitespace(line[i])) : (i += 1) {}
         return i;
     }
 
     fn findParentHadingNode(previous_node: ?*Node, level: u8) ?*Node {
         var n = previous_node orelse return null;
 
-        while (n.heading.level > level) {
-            n = n.heading.parent orelse break;
+        while (n.heading.level >= level) {
+            n = n.heading.parent orelse return null;
         }
 
         return n;
@@ -155,7 +464,9 @@ const Context = struct {
 
     fn appendHeadingNode(ctx: *Context, arena: std.mem.Allocator, level: u8, line: []const u8, options: Options) !void {
         const bracket_index = std.mem.findScalarLast(u8, line, '{');
-        const id: ?[]const u8 = if (bracket_index != null and line[line.len - 1] == '}') line[bracket_index.? .. line.len - 2] else null;
+        const has_id = bracket_index != null and line.len > 1 and line[line.len - 1] == '}';
+        const id: ?[]const u8 = if (has_id) line[bracket_index.? + 1 .. line.len - 1] else null;
+        const text = if (has_id) std.mem.trimEnd(u8, line[0..bracket_index.?], " \t") else line;
 
         const parent_node = findParentHadingNode(ctx.previous_heading, level);
 
@@ -164,14 +475,18 @@ const Context = struct {
             .heading = .{
                 .id = id,
                 .level = level,
-                .text = try parseLineText(arena, line, options),
+                .text = try parseLineText(arena, text, options),
                 .parent = parent_node,
                 .children = .empty,
             },
         };
 
-        if (parent_node) |n| try n.heading.children.append(arena, node);
-        try ctx.appendNode(arena, node);
+        if (parent_node) |n|
+            try n.heading.children.append(arena, node)
+        else
+            try ctx.graph.append(arena, node);
+        ctx.previous_heading = node;
+        ctx.previous_node = node;
     }
 
     fn innerAppendBlockQuoteNode(
@@ -306,31 +621,24 @@ const Context = struct {
         if (try reader.io_reader.takeByte() != '(') return error.InvalidMarkdownFile;
 
         const contents = try reader.io_reader.takeDelimiterExclusive(')');
-
-        const url, const hover_text = blk: {
-            var content_reader: Reader = .init(contents);
-
-            if (options.mode == .strict) {
-                if (try content_reader.isBlank()) return error.InvalidMarkdownFile;
-            } else try content_reader.skipBlank();
-
-            const url = content_reader.takeExclusive(" ") catch {
-                break :blk .{ content_reader.io_reader.buffered(), &.{} };
-            };
-
-            if (options.mode == .strict) {
-                if (try content_reader.isBlank()) return error.InvalidMarkdownFile;
-            } else try content_reader.skipBlank();
-
-            switch (try content_reader.io_reader.takeByte()) {
-                ')' => break :blk .{ url, &.{} },
-                '"' => {
-                    const hover_text = content_reader.io_reader.takeDelimiterExclusive('"') catch return error.InvalidMarkdownFile;
-                    break :blk .{ url, hover_text };
-                },
-                else => return error.InvalidMarkdownFile,
-            }
+        const content = switch (options.mode) {
+            .loose => std.mem.trim(u8, contents, " \t"),
+            .strict => strict: {
+                if (!std.mem.eql(u8, contents, std.mem.trim(u8, contents, " \t"))) return error.InvalidMarkdownFile;
+                break :strict contents;
+            },
         };
+        if (content.len == 0) return error.InvalidMarkdownFile;
+
+        const separator = std.mem.indexOfAny(u8, content, " \t");
+        const url = if (separator) |index| content[0..index] else content;
+        if (url.len == 0) return error.InvalidMarkdownFile;
+        const hover_text = if (separator) |index| hover: {
+            const rest = std.mem.trim(u8, content[index..], " \t");
+            if (rest.len == 0) break :hover &.{};
+            if (rest.len < 2 or rest[0] != '"' or rest[rest.len - 1] != '"') return error.InvalidMarkdownFile;
+            break :hover rest[1 .. rest.len - 1];
+        } else &.{};
 
         reader.toss(1);
 
@@ -428,6 +736,7 @@ const Context = struct {
         // Maybe empty line should error?
         loop: switch (reader.io_reader.takeByte() catch return &.{}) {
             '!' => {
+                const section_start = reader.start;
                 const next_byte = reader.io_reader.takeByte() catch {
                     try arr.append(arena, makeDefaultSection(&reader));
                     break :loop;
@@ -445,9 +754,14 @@ const Context = struct {
                     continue :loop next_byte_inner;
                 };
 
+                if (section_start != seek_pos - 2) {
+                    try arr.append(arena, .{ .default = reader.io_reader.buffer[section_start .. seek_pos - 2] });
+                }
                 try arr.append(arena, section);
+                continue :loop reader.io_reader.takeByte() catch break :loop;
             },
             '[' => {
+                const section_start = reader.start;
                 const seek_pos = reader.io_reader.seek;
 
                 const section = parseLinkSection(arena, &reader, .link, options) catch {
@@ -459,7 +773,11 @@ const Context = struct {
                     continue :loop next_byte_inner;
                 };
 
+                if (section_start != seek_pos - 1) {
+                    try arr.append(arena, .{ .default = reader.io_reader.buffer[section_start .. seek_pos - 1] });
+                }
                 try arr.append(arena, section);
+                continue :loop reader.io_reader.takeByte() catch break :loop;
             },
             '=', '~' => |c| {
                 const next_byte = reader.io_reader.takeByte() catch {
@@ -627,7 +945,8 @@ const Context = struct {
             return;
         }
 
-        const line = if (raw_line[raw_line.len - 1] == '\r') raw_line[0 .. raw_line.len - 2] else raw_line;
+        const line = if (raw_line[raw_line.len - 1] == '\r') raw_line[0 .. raw_line.len - 1] else raw_line;
+        if (line.len == 0) return;
 
         // TODO: Completely rework `previous_node`
         if (ctx.previous_node) |node| {
@@ -665,17 +984,17 @@ const Context = struct {
             '#' => {
                 var pos: usize = 1;
                 var level: u8 = 1;
-                while (skipped_line[pos] == '#') : (pos += 1) {
+                while (pos < skipped_line.len and skipped_line[pos] == '#') : (pos += 1) {
                     level += 1;
                 }
 
-                if (level > 6 or skipped_line[pos] != ' ') return ctx.appendTextNode(arena, skipped_line, options);
+                if (level > 6 or pos >= skipped_line.len or skipped_line[pos] != ' ') return ctx.appendTextNode(arena, skipped_line, options);
                 pos += 1;
 
                 return ctx.appendHeadingNode(arena, level, skipped_line[pos..], options);
             },
             '=' => {
-                if (std.mem.allEqual(u8, skipped_line[1..], '=')) {
+                if (skipped_line.len > 1 and std.mem.allEqual(u8, skipped_line[1..], '=')) {
                     if (ctx.previous_node) |prev_node| switch (prev_node.*) {
                         .text => |copy| {
                             prev_node.* = .{
@@ -693,8 +1012,8 @@ const Context = struct {
                 } else return ctx.appendTextNode(arena, skipped_line, options);
             },
             '-' => {
-                if (skipped_line[1] == ' ') {
-                    const is_task = skipped_line[2] == '[' and skipped_line[4] == ']' and skipped_line[5] == ' ';
+                if (skipped_line.len > 1 and skipped_line[1] == ' ') {
+                    const is_task = skipped_line.len >= 6 and skipped_line[2] == '[' and skipped_line[4] == ']' and skipped_line[5] == ' ';
 
                     return try ctx.appendListNode(
                         arena,
@@ -703,7 +1022,7 @@ const Context = struct {
                         if (is_task) skipped_line[6..] else skipped_line[2..],
                         options,
                     );
-                } else if (std.mem.allEqual(u8, skipped_line[1..], '-')) {
+                } else if (skipped_line.len > 1 and std.mem.allEqual(u8, skipped_line[1..], '-')) {
                     if (ctx.previous_node) |prev_node| switch (prev_node.*) {
                         .text => |copy| {
                             prev_node.* = .{
@@ -735,7 +1054,7 @@ const Context = struct {
             },
             '>' => {
                 var depth: u8 = 1;
-                while (depth < skipped_line.len and skipped_line[depth] == '<') {
+                while (depth < skipped_line.len and skipped_line[depth] == '>') {
                     depth += 1;
                 }
                 return ctx.appendBlockQuoteNode(arena, depth, skipped_line[depth..], options);
@@ -745,11 +1064,11 @@ const Context = struct {
             '0'...'9' => {
                 const num_len = blk: {
                     var i: usize = 1;
-                    while (std.ascii.isDigit(skipped_line[i])) : (i += 1) {}
+                    while (i < skipped_line.len and std.ascii.isDigit(skipped_line[i])) : (i += 1) {}
                     break :blk i;
                 };
 
-                if (skipped_line[num_len] == '.' and skipped_line[num_len + 1] == ' ') {
+                if (num_len + 1 < skipped_line.len and skipped_line[num_len] == '.' and skipped_line[num_len + 1] == ' ') {
                     return try ctx.appendListNode(
                         arena,
                         .{ .ordered = std.fmt.parseInt(usize, skipped_line[0..num_len], 10) catch unreachable },
