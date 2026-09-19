@@ -9,10 +9,12 @@ const CachedGraph = struct {
     source_hash: u64,
     source_len: usize,
     options_hash: u8,
+    generation: usize,
     graph: []*Parser.Node,
 };
 
 const CachedCodeBuffer = struct {
+    generation: usize,
     content_hash: u64,
     buffer: []u8,
 };
@@ -50,16 +52,19 @@ pub fn init(src: std.builtin.SourceLocation, arena: *std.heap.ArenaAllocator, fi
     const options_hash = parserOptionsHash(options.parser);
     var cached = dvui.dataGet(null, graph_id, "__graph", CachedGraph);
     if (cached == null or cached.?.source_hash != source_hash or cached.?.source_len != file.len or cached.?.options_hash != options_hash) {
+        const generation = if (cached) |previous| previous.generation +% 1 else 0;
+        _ = arena.reset(.retain_capacity);
         cached = .{
             .source_hash = source_hash,
             .source_len = file.len,
             .options_hash = options_hash,
+            .generation = generation,
             .graph = try Parser.parse(arena.allocator(), file, options.parser),
         };
         dvui.dataSet(null, graph_id, "__graph", cached.?);
     }
 
-    try Renderer.init(arena.child_allocator, cached.?.graph, options);
+    try Renderer.init(arena.child_allocator, cached.?.graph, cached.?.generation, options);
 }
 
 fn parserOptionsHash(options: Parser.Options) u8 {
@@ -73,9 +78,10 @@ pub const Renderer = struct {
     index: usize = 0,
     current_layout: ?*dvui.TextLayoutWidget = null,
     graph: []*Parser.Node,
+    generation: usize,
 
-    pub fn init(gpa: std.mem.Allocator, graph: []*Parser.Node, options: InitOptions) !void {
-        var renderer: Renderer = .{ .graph = graph };
+    pub fn init(gpa: std.mem.Allocator, graph: []*Parser.Node, generation: usize, options: InitOptions) !void {
+        var renderer: Renderer = .{ .graph = graph, .generation = generation };
         try renderer.render(gpa, options);
     }
 
@@ -102,7 +108,7 @@ pub const Renderer = struct {
                         var box = dvui.box(@src(), .{}, .{ .gravity_x = 1, .expand = .horizontal });
                         defer box.deinit();
 
-                        try Renderer.init(gpa, block.items, options);
+                        try Renderer.init(gpa, block.items, self.generation, options);
                     }
 
                     const parent_rect = dvui.parentGet().data().rect;
@@ -151,7 +157,7 @@ pub const Renderer = struct {
 
                     const content_hash = codeBlockHash(block.language, block.lines.items);
                     var cached_buffer = dvui.dataGet(null, id, "__buffer", CachedCodeBuffer);
-                    if (cached_buffer == null or cached_buffer.?.content_hash != content_hash) {
+                    if (cached_buffer == null or cached_buffer.?.generation != self.generation or cached_buffer.?.content_hash != content_hash) {
                         var arr: std.ArrayList(u8) = try .initCapacity(gpa, block.lines.items.len * 20);
 
                         for (block.lines.items) |line| {
@@ -162,6 +168,7 @@ pub const Renderer = struct {
                         if (arr.items.len > 0) _ = arr.pop();
 
                         cached_buffer = .{
+                            .generation = self.generation,
                             .content_hash = content_hash,
                             .buffer = try arr.toOwnedSlice(gpa),
                         };
