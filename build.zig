@@ -45,6 +45,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .backend = .sdl3,
     })) |dvui_dep| {
+        _ = b.addModule("lib", .{
+            .root_source_file = b.path("src/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "dvui", .module = dvui_dep.module("dvui_sdl3") },
+                .{ .name = "markdown", .module = markdown },
+            },
+        });
+
         const viewer = b.addExecutable(.{
             .name = "markdown-viewer",
             .root_module = b.createModule(.{
