@@ -1,11 +1,32 @@
 const dvui = @import("dvui");
 const std = @import("std");
 
-const Parser = @import("./Parser.zig");
+const Parser = @import("markdown");
 
 const MarkdownWidget = @This();
 
+const CachedGraph = struct {
+    arena: std.heap.ArenaAllocator,
+    source_hash: u64,
+    source_len: usize,
+    options_hash: u8,
+    generation: usize,
+    graph: []*Parser.Node,
+
+    fn deinit(ptr: *anyopaque) void {
+        const self: *CachedGraph = @ptrCast(@alignCast(ptr));
+        self.arena.deinit();
+    }
+};
+
+const CachedCodeBuffer = struct {
+    generation: usize,
+    content_hash: u64,
+    buffer: []u8,
+};
+
 pub const InitOptions = struct {
+    parser: Parser.Options = .{},
     /// Used for Code Block rendering
     tree_sitter: ?dvui.TextEntryWidget.InitOptions.TreeSitterOption = null,
     unordered_list_indicators: []const []const u8 = &.{ "•", "◦", "▪", "▫" },
@@ -23,7 +44,7 @@ pub const InitOptions = struct {
         manual_scale: bool = false,
         calculate_custom_scale: ?*const fn (image_size: dvui.Size) struct { min: ?dvui.Size, max: ?dvui.Size } = null,
     } = .{},
-    get_image: *const fn (path_or_url: []const u8) dvui.Texture.ImageSource,
+    get_image: *const fn (path_or_url: []const u8) ?dvui.Texture.ImageSource,
     /// This is for shortcodes such as `:joy:` not for `UTF-8` codes
     render_emoji: ?*const fn (tl: *dvui.TextLayoutWidget, shortcode: []const u8, option_stack: dvui.Options) void = null,
 };
@@ -33,23 +54,80 @@ pub fn init(src: std.builtin.SourceLocation, arena: *std.heap.ArenaAllocator, fi
     defer main_box.deinit();
 
     const graph_id = dvui.parentGet().extendId(src, 0);
-
-    var graph = dvui.dataGet(null, graph_id, "__graph", []*Parser.Node);
-    if (graph == null) {
-        graph = try Parser.parse(arena.allocator(), file, .{});
-        dvui.dataSet(null, graph_id, "__graph", graph.?);
+    const source_hash = std.hash.Wyhash.hash(0, file);
+    const options_hash = parserOptionsHash(options.parser);
+    var cached = dvui.dataGetPtr(null, graph_id, "__graph", CachedGraph);
+    if (graphNeedsUpdate(cached, source_hash, file.len, options_hash)) {
+        const generation = if (cached) |previous| previous.generation +% 1 else 0;
+        var new_arena = std.heap.ArenaAllocator.init(arena.child_allocator);
+        var owns_new_arena = true;
+        errdefer if (owns_new_arena) new_arena.deinit();
+        const graph = try Parser.parse(new_arena.allocator(), file, options.parser);
+        const new_cached: CachedGraph = .{
+            .arena = new_arena,
+            .source_hash = source_hash,
+            .source_len = file.len,
+            .options_hash = options_hash,
+            .generation = generation,
+            .graph = graph,
+        };
+        const old_arena = if (cached) |previous| previous.arena else null;
+        dvui.dataSet(null, graph_id, "__graph", new_cached);
+        const installed = dvui.dataGetPtr(null, graph_id, "__graph", CachedGraph) orelse {
+            return error.OutOfMemory;
+        };
+        if (installed.generation != generation or installed.source_hash != source_hash or installed.options_hash != options_hash) {
+            return error.OutOfMemory;
+        }
+        owns_new_arena = false;
+        if (old_arena) |old| old.deinit();
+        dvui.dataSetDeinitFunction(null, graph_id, "__graph", &CachedGraph.deinit);
+        cached = installed;
     }
 
-    try Renderer.init(arena.child_allocator, graph.?, options);
+    try Renderer.init(cached.?.arena.allocator(), cached.?.graph, cached.?.generation, options);
+}
+
+fn graphNeedsUpdate(cached: ?*const CachedGraph, source_hash: u64, source_len: usize, options_hash: u8) bool {
+    const current = cached orelse return true;
+    return current.source_hash != source_hash or current.source_len != source_len or current.options_hash != options_hash;
+}
+
+fn parserOptionsHash(options: Parser.Options) u8 {
+    return @intFromEnum(options.mode) |
+        (@as(u8, @intFromBool(options.parse_arbitrary_urls)) << 1) |
+        (@as(u8, @intFromBool(options.underline_extension)) << 2) |
+        (@as(u8, @intFromBool(options.typographic_replacement)) << 3);
+}
+
+test "parser options participate in graph cache identity" {
+    const loose = parserOptionsHash(.{ .mode = .loose });
+    const strict = parserOptionsHash(.{ .mode = .strict });
+    try std.testing.expect(loose != strict);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cached: CachedGraph = .{
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
+        .source_hash = 1,
+        .source_len = 2,
+        .options_hash = loose,
+        .generation = 0,
+        .graph = &.{},
+    };
+    defer cached.arena.deinit();
+    try std.testing.expect(!graphNeedsUpdate(&cached, 1, 2, loose));
+    try std.testing.expect(graphNeedsUpdate(&cached, 1, 2, strict));
 }
 
 pub const Renderer = struct {
     index: usize = 0,
     current_layout: ?*dvui.TextLayoutWidget = null,
     graph: []*Parser.Node,
+    generation: usize,
 
-    pub fn init(gpa: std.mem.Allocator, graph: []*Parser.Node, options: InitOptions) !void {
-        var renderer: Renderer = .{ .graph = graph };
+    pub fn init(gpa: std.mem.Allocator, graph: []*Parser.Node, generation: usize, options: InitOptions) !void {
+        var renderer: Renderer = .{ .graph = graph, .generation = generation };
         try renderer.render(gpa, options);
     }
 
@@ -76,7 +154,7 @@ pub const Renderer = struct {
                         var box = dvui.box(@src(), .{}, .{ .gravity_x = 1, .expand = .horizontal });
                         defer box.deinit();
 
-                        try Renderer.init(gpa, block.items, options);
+                        try Renderer.init(gpa, block.items, self.generation, options);
                     }
 
                     const parent_rect = dvui.parentGet().data().rect;
@@ -107,9 +185,10 @@ pub const Renderer = struct {
                 .code_block => |block| {
                     if (!block.closed) {
                         const tl = self.getTextLayout();
-                        tl.format("```{s}", .{block.language}, .{});
+                        tl.format("```{s}\n", .{block.language}, .{});
                         for (block.lines.items) |line| {
                             tl.addText(line, .{});
+                            tl.addText("\n", .{});
                         }
                         continue;
                     }
@@ -122,8 +201,9 @@ pub const Renderer = struct {
 
                     const id = dvui.parentGet().extendId(@src(), 0);
 
-                    var buffer = dvui.dataGet(null, id, "__buffer", []u8);
-                    if (buffer == null) {
+                    const content_hash = codeBlockHash(block.language, block.lines.items);
+                    var cached_buffer = dvui.dataGet(null, id, "__buffer", CachedCodeBuffer);
+                    if (cached_buffer == null or cached_buffer.?.generation != self.generation or cached_buffer.?.content_hash != content_hash) {
                         var arr: std.ArrayList(u8) = try .initCapacity(gpa, block.lines.items.len * 20);
 
                         for (block.lines.items) |line| {
@@ -131,16 +211,20 @@ pub const Renderer = struct {
                             try arr.append(gpa, '\n');
                         }
 
-                        _ = arr.pop();
+                        if (arr.items.len > 0) _ = arr.pop();
 
-                        buffer = try arr.toOwnedSlice(gpa);
-                        dvui.dataSet(null, id, "buffer", buffer.?);
+                        cached_buffer = .{
+                            .generation = self.generation,
+                            .content_hash = content_hash,
+                            .buffer = try arr.toOwnedSlice(gpa),
+                        };
+                        dvui.dataSet(null, id, "__buffer", cached_buffer.?);
                     }
 
                     var te: dvui.TextEntryWidget = undefined;
                     te.init(@src(), .{
                         .multiline = true,
-                        .text = .{ .buffer = buffer.? },
+                        .text = .{ .buffer = cached_buffer.?.buffer },
                         .tree_sitter = options.tree_sitter,
                     }, .{
                         .background = true,
@@ -174,7 +258,10 @@ pub const Renderer = struct {
                 .list => |list| {
                     self.renderList(list, 0, options);
                 },
-                .table => {},
+                .table => |columns| {
+                    self.deinitTextLayout();
+                    try self.renderTable(gpa, columns, options);
+                },
                 .footnote => {},
                 .alert => {},
                 .container => {},
@@ -182,21 +269,48 @@ pub const Renderer = struct {
         }
     }
 
+    fn codeBlockHash(language: []const u8, lines: []const []const u8) u64 {
+        var hash = std.hash.Wyhash.init(0);
+        hash.update(language);
+        for (lines) |line| {
+            hash.update(line);
+            hash.update("\n");
+        }
+        return hash.final();
+    }
+
     fn renderList(self: *Renderer, list: std.ArrayList(*Parser.Node.Element), iter: usize, options: InitOptions) void {
         const tl = self.getTextLayout();
 
-        var initial: usize = 0;
+        var ordered_initial: usize = 0;
+        var ordered_index: usize = 0;
+        var in_ordered_run = false;
         for (list.items, 0..) |element, i| {
             switch (element.data) {
                 .ordered => |num| {
-                    if (initial == 0) initial = if (options.ordered_list_alphabetic) 'a' else @max(num, 1);
-                    tl.format("{[num]d:>[i]}. ", .{ .i = iter * 4, .num = initial + i }, .{});
+                    if (!in_ordered_run) {
+                        ordered_initial = @max(num, 1);
+                        ordered_index = 0;
+                        in_ordered_run = true;
+                    }
+                    if (options.ordered_list_alphabetic) {
+                        const marker: u8 = @intCast('a' + (ordered_index % 26));
+                        tl.format("{[marker]c:>[i]}. ", .{ .i = iter * 4, .marker = marker }, .{});
+                    } else {
+                        tl.format("{[num]d:>[i]}. ", .{ .i = iter * 4, .num = ordered_initial + ordered_index }, .{});
+                    }
+                    ordered_index += 1;
                 },
                 .unordered => {
-                    const indicator = options.unordered_list_indicators[iter % options.unordered_list_indicators.len];
+                    in_ordered_run = false;
+                    const indicator = if (options.unordered_list_indicators.len == 0)
+                        "•"
+                    else
+                        options.unordered_list_indicators[iter % options.unordered_list_indicators.len];
                     tl.format("{[indicator]s:>[i]} ", .{ .i = iter * 4, .indicator = indicator }, .{});
                 },
                 .task => |done| {
+                    in_ordered_run = false;
                     if (iter > 0) tl.format("{[e]c:<[i]}", .{ .e = ' ', .i = iter * 4 }, .{});
                     var wdo: dvui.WidgetData = undefined;
                     checkbox(@src(), done, .{
@@ -213,6 +327,84 @@ pub const Renderer = struct {
             iterateSections(tl, .{ .font = dvui.themeGet().font_body }, element.text, null, options);
             renderList(self, element.children, iter + 1, options);
         }
+    }
+
+    fn renderTable(self: *Renderer, gpa: std.mem.Allocator, columns: []Parser.Node.Column, options: InitOptions) !void {
+        _ = self;
+        _ = gpa;
+        if (columns.len == 0) return;
+
+        const col_widths = try dvui.currentWindow().arena().alloc(f32, columns.len);
+
+        var grid = dvui.grid(
+            @src(),
+            .colWidths(col_widths),
+            .{ .row_height_variable = true },
+            .{
+                .expand = .horizontal,
+                .margin = .{ .y = 8, .h = 8 },
+                .border = .all(1),
+                .corner_radius = .all(4),
+            },
+        );
+        defer grid.deinit();
+
+        const available_width = grid.data().contentRect().w - dvui.GridWidget.scrollbar_padding_defaults.w;
+        const column_width = @max(available_width / @as(f32, @floatFromInt(columns.len)), 140);
+        @memset(col_widths, column_width);
+
+        const border_color = dvui.themeGet().border;
+        const header_fill = dvui.themeGet().color(.control, .fill);
+        const alternate_fill = dvui.themeGet().color(.control, .fill_press);
+
+        for (columns, 0..) |column, column_index| {
+            var cell = grid.headerCell(@src(), column_index, .{
+                .background = true,
+                .color_fill = header_fill,
+                .color_border = border_color,
+                .border = .all(0.5),
+                .padding = .all(8),
+            });
+            defer cell.deinit();
+
+            var tl = dvui.textLayout(@src(), .{}, .{
+                .expand = .horizontal,
+                .gravity_x = tableGravity(column.alignment),
+            });
+            iterateSections(tl, .{ .font = dvui.themeGet().font_body.withWeight(.bold) }, column.header, null, options);
+            tl.deinit();
+        }
+
+        const row_count = columns[0].values.len;
+        for (0..row_count) |row_index| {
+            for (columns, 0..) |column, column_index| {
+                var cell = grid.bodyCell(@src(), .colRow(column_index, row_index), .{
+                    .background = true,
+                    .color_fill = if (row_index % 2 == 0) null else alternate_fill,
+                    .color_border = border_color,
+                    .border = .all(0.5),
+                    .padding = .all(8),
+                });
+                defer cell.deinit();
+
+                var tl = dvui.textLayout(@src(), .{}, .{
+                    .expand = .horizontal,
+                    .gravity_x = tableGravity(column.alignment),
+                });
+                if (row_index < column.values.len) {
+                    iterateSections(tl, .{ .font = dvui.themeGet().font_body }, column.values[row_index], null, options);
+                }
+                tl.deinit();
+            }
+        }
+    }
+
+    fn tableGravity(alignment: Parser.Node.Column.Alignment) f32 {
+        return switch (alignment) {
+            .left => 0,
+            .center => 0.5,
+            .right => 1,
+        };
     }
 
     fn checkbox(src: std.builtin.SourceLocation, target: bool, opts: dvui.Options) void {
@@ -312,12 +504,14 @@ pub const Renderer = struct {
                 },
                 .image => |image| {
                     const parent_rect = dvui.parentGet().data().rect;
-                    const image_source = options.get_image(image.path);
+                    const image_source = options.get_image(image.path) orelse {
+                        iterateSections(tl, dvui_opts, image.alt_text, url, options);
+                        continue;
+                    };
 
                     const image_size = dvui.imageSize(image_source) catch {
-                        std.log.info("Image size could not be gathered, assuming default size", .{});
-                        // TODO: Implement placeholder
-                        return;
+                        iterateSections(tl, dvui_opts, image.alt_text, url, options);
+                        continue;
                     };
 
                     var image_options: dvui.Options = .{
@@ -350,8 +544,6 @@ pub const Renderer = struct {
                     }
 
                     const wdo = dvui.image(@src(), .{ .source = image_source, .shrink = .ratio }, image_options);
-
-                    dvui.log.info("Image Rect: {any}", .{wdo.rect});
 
                     tl.insert_pt.y += wdo.rect.h;
                     // TODO: Remove this when dvui fixes the issue
