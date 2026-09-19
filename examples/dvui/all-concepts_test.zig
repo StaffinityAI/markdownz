@@ -28,6 +28,7 @@ test "default viewer document exercises supported concepts" {
     try std.testing.expect(hasSection(nodes, .highlight));
     try std.testing.expect(hasSection(nodes, .code));
     try std.testing.expect(hasSection(nodes, .emoji_shortcode));
+    try std.testing.expect(hasStandaloneImage(nodes, default_document.image_name));
 
     const table = findFirstTable(nodes).?;
     try std.testing.expectEqual(@as(usize, 3), table.len);
@@ -104,4 +105,16 @@ fn findFirstTable(nodes: []const *markdown.Node) ?[]markdown.Node.Column {
         }
     }
     return null;
+}
+
+fn hasStandaloneImage(nodes: []const *markdown.Node, expected_path: []const u8) bool {
+    for (nodes) |node| switch (node.*) {
+        .text => |sections| {
+            if (sections.len == 1 and sections[0] == .image and std.mem.eql(u8, sections[0].image.path, expected_path)) return true;
+        },
+        .heading => |heading| if (hasStandaloneImage(heading.children.items, expected_path)) return true,
+        .block_quote => |quote| if (hasStandaloneImage(quote.items, expected_path)) return true,
+        else => {},
+    };
+    return false;
 }

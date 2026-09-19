@@ -26,7 +26,9 @@ The parser also recognizes __underline extension syntax__ when its underline opt
 
 ## Links and images
 
-[A **formatted** link title](https://ziglang.org/ "Zig programming language") and ![an *inline-formatted* image description](markdown.png "One parser, multiple renderers").
+[A **formatted** link title](https://ziglang.org/ "Zig programming language")
+
+![an *inline-formatted* image description](markdown.png "One parser, multiple renderers")
 
 ## Block quotes
 
