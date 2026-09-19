@@ -8,10 +8,12 @@ const MarkdownWidget = @This();
 const CachedGraph = struct {
     source_hash: u64,
     source_len: usize,
+    options_hash: u8,
     graph: []*Parser.Node,
 };
 
 pub const InitOptions = struct {
+    parser: Parser.Options = .{},
     /// Used for Code Block rendering
     tree_sitter: ?dvui.TextEntryWidget.InitOptions.TreeSitterOption = null,
     unordered_list_indicators: []const []const u8 = &.{ "•", "◦", "▪", "▫" },
@@ -40,17 +42,26 @@ pub fn init(src: std.builtin.SourceLocation, arena: *std.heap.ArenaAllocator, fi
 
     const graph_id = dvui.parentGet().extendId(src, 0);
     const source_hash = std.hash.Wyhash.hash(0, file);
+    const options_hash = parserOptionsHash(options.parser);
     var cached = dvui.dataGet(null, graph_id, "__graph", CachedGraph);
-    if (cached == null or cached.?.source_hash != source_hash or cached.?.source_len != file.len) {
+    if (cached == null or cached.?.source_hash != source_hash or cached.?.source_len != file.len or cached.?.options_hash != options_hash) {
         cached = .{
             .source_hash = source_hash,
             .source_len = file.len,
-            .graph = try Parser.parse(arena.allocator(), file, .{}),
+            .options_hash = options_hash,
+            .graph = try Parser.parse(arena.allocator(), file, options.parser),
         };
         dvui.dataSet(null, graph_id, "__graph", cached.?);
     }
 
     try Renderer.init(arena.child_allocator, cached.?.graph, options);
+}
+
+fn parserOptionsHash(options: Parser.Options) u8 {
+    return @intFromEnum(options.mode) |
+        (@as(u8, @intFromBool(options.parse_arbitrary_urls)) << 1) |
+        (@as(u8, @intFromBool(options.underline_extension)) << 2) |
+        (@as(u8, @intFromBool(options.typographic_replacement)) << 3);
 }
 
 pub const Renderer = struct {

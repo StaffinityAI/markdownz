@@ -82,7 +82,10 @@ pub fn main(init: std.process.Init) !void {
         {
             var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both });
             defer scroll.deinit();
-            try MarkdownWidget.init(@src(), &widget_arena, markdown_source, .{ .get_image = getImage });
+            try MarkdownWidget.init(@src(), &widget_arena, markdown_source, .{
+                .parser = .{ .underline_extension = true },
+                .get_image = getImage,
+            });
         }
 
         var keep_running = true;
