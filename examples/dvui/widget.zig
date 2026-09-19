@@ -234,10 +234,10 @@ pub const Renderer = struct {
 
     fn renderTable(self: *Renderer, gpa: std.mem.Allocator, columns: []Parser.Node.Column, options: InitOptions) !void {
         _ = self;
+        _ = gpa;
         if (columns.len == 0) return;
 
-        const col_widths = try gpa.alloc(f32, columns.len);
-        defer gpa.free(col_widths);
+        const col_widths = try dvui.currentWindow().arena().alloc(f32, columns.len);
 
         var grid = dvui.grid(
             @src(),
