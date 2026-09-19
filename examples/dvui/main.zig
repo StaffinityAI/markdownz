@@ -14,6 +14,7 @@ var markdown_dir: []const u8 = ".";
 var image_cache: std.StringHashMapUnmanaged([]const u8) = .empty;
 var image_arena: std.mem.Allocator = undefined;
 var app_io: std.Io = undefined;
+var using_default_document = false;
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -36,6 +37,7 @@ pub fn main(init: std.process.Init) !void {
         break :title try image_arena.dupeZ(u8, std.fs.path.basename(args[1]));
     } else title: {
         markdown_source = default_markdown;
+        using_default_document = true;
         break :title default_title;
     };
     defer if (args.len == 2) init.gpa.free(markdown_source);
@@ -109,6 +111,10 @@ fn getImage(path_or_url: []const u8) dvui.Texture.ImageSource {
 }
 
 fn loadImage(path_or_url: []const u8) ![]const u8 {
+    if (using_default_document and std.mem.eql(u8, path_or_url, default_document.image_name)) {
+        return default_document.image;
+    }
+
     if (std.mem.startsWith(u8, path_or_url, "http://") or std.mem.startsWith(u8, path_or_url, "https://")) {
         return error.RemoteImagesUnsupported;
     }

@@ -1,6 +1,6 @@
 # Markdown concept gallery
 
-This document is the default input for the DVUI Markdown viewer. Pass a file path on the command line to view another document.
+This document exercises the standalone Markdown parser and its example renderers. Pass a file path on the command line to view another document.
 
 ## Headings
 
@@ -30,7 +30,7 @@ Subscript syntax H~2~O and superscript syntax 2^10^ are included for feature tra
 
 [A link to the Zig website](https://ziglang.org/ "Zig programming language") and an automatic-looking URL: https://example.com/path?q=markdown
 
-![Remote image placeholder](https://example.com/markdown.png "Remote images are intentionally unsupported by the sample")
+![Markdown rendered across graphical and terminal interfaces](markdown.png "One parser, multiple renderers")
 
 ## Block quotes
 

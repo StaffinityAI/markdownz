@@ -13,10 +13,21 @@ const Event = union(enum) {
     winsize: vaxis.Winsize,
 };
 
+const ImageBlock = struct {
+    path: []const u8,
+    image: ?vaxis.Image = null,
+};
+
+const ImageRef = struct {
+    alt_text: []markdown.Node.Section,
+    path: []const u8,
+};
+
 const LineKind = union(enum) {
     normal,
     heading: u8,
     code,
+    image: ImageBlock,
     rule,
 };
 
@@ -53,6 +64,14 @@ const Renderer = struct {
                 try self.render(heading.children.items, quote_depth);
             },
             .text => |sections| {
+                if (standaloneImage(sections)) |image| {
+                    var segments: std.ArrayList(vaxis.Segment) = .empty;
+                    try segments.append(self.allocator, .{ .text = "Image: ", .style = .{ .bold = true, .fg = .{ .index = 6 } } });
+                    try self.appendSections(&segments, image.alt_text, .{ .italic = true }, null);
+                    try self.addLine(&segments, 1, .{ .image = .{ .path = image.path } });
+                    continue;
+                }
+
                 var segments: std.ArrayList(vaxis.Segment) = .empty;
                 try self.appendPrefix(&segments, quote_depth, "");
                 try self.appendSections(&segments, sections, .{}, null);
@@ -241,6 +260,14 @@ pub fn main(init: std.process.Init) !void {
 
     try vx.enterAltScreen(tty.writer());
     try vx.queryTerminal(tty.writer(), .fromSeconds(1));
+    try loadDocumentImages(
+        &document,
+        &vx,
+        tty.writer(),
+        init.gpa,
+        if (args.len == 2) std.fs.path.dirname(args[1]) orelse "." else null,
+    );
+    defer freeDocumentImages(document.lines.items, vx, tty.writer());
 
     const title = if (args.len == 2) std.fs.path.basename(args[1]) else "Markdown concepts";
     var scroll: usize = 0;
@@ -305,6 +332,54 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
+fn loadDocumentImages(
+    document: *Document,
+    vx: *vaxis.Vaxis,
+    tty: *std.Io.Writer,
+    allocator: std.mem.Allocator,
+    markdown_dir: ?[]const u8,
+) !void {
+    if (!vx.caps.kitty_graphics) return;
+
+    for (document.lines.items) |*line| switch (line.kind) {
+        .image => |*image| {
+            image.image = if (markdown_dir) |dir| blk: {
+                const path = if (std.fs.path.isAbsolute(image.path))
+                    image.path
+                else
+                    try std.fs.path.join(allocator, &.{ dir, image.path });
+                defer if (path.ptr != image.path.ptr) allocator.free(path);
+                break :blk vx.loadImage(allocator, tty, .{ .path = path }) catch |err| {
+                    std.log.warn("unable to load image '{s}': {s}", .{ image.path, @errorName(err) });
+                    continue;
+                };
+            } else if (std.mem.eql(u8, image.path, default_document.image_name))
+                vx.loadImage(allocator, tty, .{ .mem = default_document.image }) catch |err| {
+                    std.log.warn("unable to load embedded image '{s}': {s}", .{ image.path, @errorName(err) });
+                    continue;
+                }
+            else
+                continue;
+        },
+        else => {},
+    };
+}
+
+fn freeDocumentImages(lines: []const Line, vx: vaxis.Vaxis, tty: *std.Io.Writer) void {
+    for (lines) |line| switch (line.kind) {
+        .image => |image| if (image.image) |loaded| vx.freeImage(tty, loaded.id),
+        else => {},
+    };
+}
+
+fn standaloneImage(sections: []markdown.Node.Section) ?ImageRef {
+    if (sections.len != 1) return null;
+    return switch (sections[0]) {
+        .image => |image| .{ .alt_text = image.alt_text, .path = image.path },
+        else => null,
+    };
+}
+
 fn documentHeight(measure: vaxis.Window, lines: []const Line) usize {
     var total: usize = 0;
     for (lines) |line| {
@@ -318,6 +393,7 @@ fn lineHeight(measure: vaxis.Window, line: Line) usize {
     return switch (line.kind) {
         .rule => 1,
         .normal, .code => measuredLineHeight(measure, line.segments),
+        .image => 14,
         .heading => |level| measuredLineHeight(measure, line.segments) + @as(usize, switch (level) {
             1 => 2,
             2 => 1,
@@ -360,6 +436,13 @@ fn drawDocument(viewport: vaxis.Window, lines: []const Line, scroll: usize) void
                     line_window.fill(.{ .char = .{ .grapheme = " " }, .style = .{ .bg = .{ .index = 0 } } });
                     _ = line_window.print(line.segments, .{ .wrap = .word });
                 },
+                .image => |image| {
+                    if (image.image) |loaded| {
+                        loaded.draw(line_window, .{ .scale = .contain }) catch drawImageFallback(line_window, line.segments);
+                    } else {
+                        drawImageFallback(line_window, line.segments);
+                    }
+                },
                 .normal => _ = line_window.print(line.segments, .{ .wrap = .word }),
             }
         }
@@ -377,6 +460,15 @@ fn drawRule(viewport: vaxis.Window, row: u16) void {
             .style = .{ .fg = .{ .index = 8 } },
         });
     }
+}
+
+fn drawImageFallback(win: vaxis.Window, segments: []const vaxis.Segment) void {
+    win.fill(.{ .char = .{ .grapheme = " " }, .style = .{ .bg = .{ .index = 0 } } });
+    _ = win.print(segments, .{ .row_offset = 1, .col_offset = 2, .wrap = .word });
+    _ = win.printSegment(.{
+        .text = "Kitty graphics support is unavailable in this terminal.",
+        .style = .{ .dim = true },
+    }, .{ .row_offset = 3, .col_offset = 2, .wrap = .word });
 }
 
 fn drawHeadingBackground(win: vaxis.Window, level: u8) void {
