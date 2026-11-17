@@ -279,4 +279,33 @@ pub fn build(b: *std.Build) void {
             run_web_example_step.dependOn(&run_web_example.step);
         }
     }
+
+    // What CI runs, so `zig build ci` reproduces a CI run. The optional
+    // modules sit behind options, so those builds run as nested `zig build`s,
+    // one after another so they do not compete for the machine.
+    const ci_step = b.step("ci", "Run what CI runs (formatting, then tests with every option)");
+    {
+        const fmt = b.addFmt(.{ .paths = &.{ b.path("build.zig"), b.path("build.zig.zon"), b.path("src"), b.path("examples") }, .check = true });
+        ci_step.dependOn(&fmt.step);
+        // Without options, so parser-only consumers never need a lazy dependency.
+        ci_step.dependOn(test_step);
+
+        var previous: *std.Build.Step = test_step;
+        for ([_][]const []const u8{
+            &.{ "test", "cli-example", "vaxis-viewer", "web-example", "dvui-viewer", "-Ddvui=true", "-Dvaxis=true", "-Dhttp=true" },
+            &.{ "test", "-Dterminal=true", "-Doptimize=ReleaseSafe" },
+            &.{ "test-compile", "-Dterminal=true", "-Dtarget=x86_64-linux-gnu" },
+            &.{ "test-compile", "-Dterminal=true", "-Dtarget=aarch64-macos" },
+            &.{ "test-compile", "-Dterminal=true", "-Dtarget=x86_64-windows" },
+        }) |args| {
+            const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
+            run.setName(b.fmt("zig build {s}", .{std.mem.join(b.allocator, " ", args) catch @panic("OOM")}));
+            run.addArgs(args);
+            run.setCwd(b.path("."));
+            run.has_side_effects = true;
+            run.step.dependOn(previous);
+            ci_step.dependOn(&run.step);
+            previous = &run.step;
+        }
+    }
 }

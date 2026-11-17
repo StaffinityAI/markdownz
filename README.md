@@ -160,4 +160,6 @@ zig build test -Doptimize=ReleaseSafe
 zig build test-compile -Dtarget=x86_64-linux-gnu
 ```
 
+`zig build ci` runs what CI runs: a formatting check, the tests above, and the tests and examples with every option enabled.
+
 Licensed under the MIT License.
