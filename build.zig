@@ -20,6 +20,27 @@ pub fn build(b: *std.Build) void {
             .{ .name = "markdown", .module = markdown },
         },
     });
+    // libvaxis needs these fields as well, and is built against this module
+    // so both measure text with the same tables.
+    const uucode = b.dependency("uucode", .{
+        .target = target,
+        .optimize = optimize,
+        .fields = @as([]const []const u8, &.{
+            "east_asian_width",
+            "grapheme_break",
+            "general_category",
+            "is_emoji_presentation",
+        }),
+    }).module("uucode");
+    const markdown_term = b.addModule("markdown-term", .{
+        .root_source_file = b.path("src/TerminalRenderer.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "markdown", .module = markdown },
+            .{ .name = "uucode", .module = uucode },
+        },
+    });
     const default_document = b.createModule(.{
         .root_source_file = b.path("examples/default_document.zig"),
         .target = target,
@@ -46,14 +67,40 @@ pub fn build(b: *std.Build) void {
         .name = "markdown-html-tests",
         .root_module = markdown_html,
     });
+    const term_tests = b.addTest(.{
+        .name = "markdown-term-tests",
+        .root_module = markdown_term,
+    });
     const test_step = b.step("test", "Run parser tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
     test_step.dependOn(&b.addRunArtifact(fixture_tests).step);
     test_step.dependOn(&b.addRunArtifact(html_tests).step);
+    test_step.dependOn(&b.addRunArtifact(term_tests).step);
     const test_compile_step = b.step("test-compile", "Compile parser tests for the selected target");
     test_compile_step.dependOn(&tests.step);
     test_compile_step.dependOn(&fixture_tests.step);
     test_compile_step.dependOn(&html_tests.step);
+    test_compile_step.dependOn(&term_tests.step);
+
+    const cli_example = b.addExecutable(.{
+        .name = "markdown-cli",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/cli/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "markdown", .module = markdown },
+                .{ .name = "markdown-term", .module = markdown_term },
+                .{ .name = "default_document", .module = default_document },
+            },
+        }),
+    });
+    const cli_example_step = b.step("cli-example", "Build the terminal CLI example");
+    cli_example_step.dependOn(&cli_example.step);
+    const run_cli_example = b.addRunArtifact(cli_example);
+    run_cli_example.addPassthruArgs();
+    const run_cli_example_step = b.step("run-cli", "Render markdown to the terminal with the CLI example");
+    run_cli_example_step.dependOn(&run_cli_example.step);
 
     const viewer_step = b.step("dvui-viewer", "Build the DVUI markdown viewer example");
     const run_viewer_step = b.step("run-gui", "Run the DVUI markdown viewer example");
@@ -149,7 +196,10 @@ pub fn build(b: *std.Build) void {
         if (b.lazyDependency("vaxis", .{
             .target = target,
             .optimize = optimize,
+            .external_uucode = true,
         })) |vaxis_dep| {
+            const vaxis = vaxis_dep.module("vaxis");
+            vaxis.addImport("uucode", uucode);
             const vaxis_viewer = b.addExecutable(.{
                 .name = "markdown-vaxis-viewer",
                 .root_module = b.createModule(.{
@@ -158,8 +208,9 @@ pub fn build(b: *std.Build) void {
                     .optimize = optimize,
                     .imports = &.{
                         .{ .name = "markdown", .module = markdown },
+                        .{ .name = "markdown-term", .module = markdown_term },
                         .{ .name = "default_document", .module = default_document },
-                        .{ .name = "vaxis", .module = vaxis_dep.module("vaxis") },
+                        .{ .name = "vaxis", .module = vaxis },
                     },
                 }),
             });
