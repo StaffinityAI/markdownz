@@ -30,7 +30,7 @@ pub fn main(init: std.process.Init) !void {
 
     var arena = std.heap.ArenaAllocator.init(init.gpa);
     defer arena.deinit();
-    const nodes = try markdown.parse(arena.allocator(), source, .{});
+    const nodes = try markdown.parse(arena.allocator(), source, .{ .underline_extension = true });
 
     const stdout = std.Io.File.stdout();
     const color = switch (arguments.color) {

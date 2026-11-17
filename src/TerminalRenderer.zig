@@ -44,6 +44,11 @@ pub const Table = struct {
 
 pub const Block = struct {
     spans: []const Span = &.{},
+    /// Drawn left of the first text row, such as quote bars and a list marker.
+    prefix: []const Span = &.{},
+    /// Drawn left of every other row, such as quote bars and a hanging indent.
+    /// The text starts right of the wider of `prefix` and `continuation`.
+    continuation: []const Span = &.{},
     gap_before: u8 = 0,
     kind: Kind = .normal,
 
@@ -83,46 +88,44 @@ const Builder = struct {
         for (nodes) |node| switch (node.*) {
             .heading => |heading| {
                 var spans: std.ArrayList(Span) = .empty;
-                try self.appendPrefix(&spans, quote_depth, "");
                 try spans.append(self.allocator, .{
                     .text = headingMarker(heading.level),
                     .style = headingStyle(heading.level),
                 });
                 try self.appendSections(&spans, heading.text, headingStyle(heading.level), null);
-                try self.addBlock(&spans, headingGap(heading.level), .{ .heading = heading.level });
+                const bars = try self.quoteBars(quote_depth, "");
+                try self.addBlock(&spans, .{ .prefix = bars, .continuation = bars, .gap_before = headingGap(heading.level), .kind = .{ .heading = heading.level } });
                 try self.render(heading.children.items, quote_depth);
             },
             .text => |sections| {
+                const bars = try self.quoteBars(quote_depth, "");
+                var spans: std.ArrayList(Span) = .empty;
                 if (standaloneImage(sections)) |image| {
-                    var spans: std.ArrayList(Span) = .empty;
-                    try self.appendPrefix(&spans, quote_depth, "");
                     try spans.append(self.allocator, .{ .text = "Image: ", .style = .{ .bold = true, .fg = .{ .index = 6 } } });
                     try self.appendSections(&spans, image.alt_text, .{ .italic = true }, null);
-                    try self.addBlock(&spans, 1, .{ .image = image.path });
+                    try self.addBlock(&spans, .{ .prefix = bars, .continuation = bars, .gap_before = 1, .kind = .{ .image = image.path } });
                     continue;
                 }
-
-                var spans: std.ArrayList(Span) = .empty;
-                try self.appendPrefix(&spans, quote_depth, "");
                 try self.appendSections(&spans, sections, .{}, null);
-                try self.addBlock(&spans, 0, .normal);
+                try self.addBlock(&spans, .{ .prefix = bars, .continuation = bars });
             },
             .line_break => try self.addTextBlock(quote_depth, "", .{}),
             .horizontal_rule => try self.blocks.append(self.allocator, .{ .gap_before = 1, .kind = .rule }),
             .code_block => |block| {
                 const label = if (block.language.len == 0) "code" else block.language;
+                const header_bars = try self.quoteBars(quote_depth, "");
+                applyBackground(header_bars, .{ .index = 0 });
                 var header: std.ArrayList(Span) = .empty;
-                try self.appendPrefix(&header, quote_depth, "");
                 try header.append(self.allocator, .{ .text = "  " });
                 try header.append(self.allocator, .{ .text = label, .style = .{ .bold = true, .fg = .{ .index = 6 } } });
                 applyBackground(header.items, .{ .index = 0 });
-                try self.addBlock(&header, 1, .code);
+                try self.addBlock(&header, .{ .prefix = header_bars, .continuation = header_bars, .gap_before = 1, .kind = .code });
+                const line_prefix = try self.quoteBars(quote_depth, "    ");
+                applyBackground(line_prefix, .{ .index = 0 });
                 for (block.lines.items) |line| {
                     var spans: std.ArrayList(Span) = .empty;
-                    try self.appendPrefix(&spans, quote_depth, "    ");
-                    try spans.append(self.allocator, .{ .text = line, .style = .{ .fg = .{ .index = 2 } } });
-                    applyBackground(spans.items, .{ .index = 0 });
-                    try self.addBlock(&spans, 0, .code);
+                    try spans.append(self.allocator, .{ .text = line, .style = .{ .fg = .{ .index = 2 }, .bg = .{ .index = 0 } } });
+                    try self.addBlock(&spans, .{ .prefix = line_prefix, .continuation = line_prefix, .kind = .code });
                 }
             },
             .list => |list| try self.renderList(list.items, 0, quote_depth),
@@ -130,9 +133,11 @@ const Builder = struct {
             .table => |columns| try self.renderTable(columns),
             .footnote => |sections| {
                 var spans: std.ArrayList(Span) = .empty;
-                try self.appendPrefix(&spans, quote_depth, "[^] ");
                 try self.appendSections(&spans, sections, .{ .dim = true }, null);
-                try self.addBlock(&spans, 0, .normal);
+                try self.addBlock(&spans, .{
+                    .prefix = try self.quoteBars(quote_depth, "[^] "),
+                    .continuation = try self.quoteBars(quote_depth, "    "),
+                });
             },
             .alert => try self.addTextBlock(quote_depth, "[alert]", .{ .bold = true, .fg = .{ .index = 3 } }),
             .container => try self.addTextBlock(quote_depth, "[container]", .{ .dim = true }),
@@ -141,20 +146,24 @@ const Builder = struct {
 
     fn renderList(self: *Builder, elements: []const *markdown.Node.Element, depth: usize, quote_depth: usize) !void {
         for (elements) |element| {
-            var spans: std.ArrayList(Span) = .empty;
-            try self.appendPrefix(&spans, quote_depth, "");
-            const indent = try self.allocator.alloc(u8, depth * 2);
-            @memset(indent, ' ');
-            try spans.append(self.allocator, .{ .text = indent });
-
             const marker = switch (element.data) {
                 .ordered => |number| try std.fmt.allocPrint(self.allocator, "{d}. ", .{number}),
                 .unordered => "• ",
                 .task => |done| if (done) "[x] " else "[ ] ",
             };
-            try spans.append(self.allocator, .{ .text = marker, .style = .{ .bold = true, .fg = .{ .index = 6 } } });
+            const indent = try self.allocator.alloc(u8, depth * 2 + stringWidth(marker));
+            @memset(indent, ' ');
+
+            var prefix: std.ArrayList(Span) = .empty;
+            try prefix.appendSlice(self.allocator, try self.quoteBars(quote_depth, indent[0 .. depth * 2]));
+            try prefix.append(self.allocator, .{ .text = marker, .style = .{ .bold = true, .fg = .{ .index = 6 } } });
+
+            var spans: std.ArrayList(Span) = .empty;
             try self.appendSections(&spans, element.text, .{}, null);
-            try self.addBlock(&spans, 0, .normal);
+            try self.addBlock(&spans, .{
+                .prefix = try prefix.toOwnedSlice(self.allocator),
+                .continuation = try self.quoteBars(quote_depth, indent),
+            });
             try self.renderList(element.children.items, depth + 1, quote_depth);
         }
     }
@@ -190,11 +199,12 @@ const Builder = struct {
         return spans.toOwnedSlice(self.allocator);
     }
 
-    fn appendPrefix(self: *Builder, spans: *std.ArrayList(Span), quote_depth: usize, suffix: []const u8) !void {
-        for (0..quote_depth) |_| {
-            try spans.append(self.allocator, .{ .text = "│ ", .style = .{ .fg = .{ .index = 6 } } });
-        }
-        if (suffix.len > 0) try spans.append(self.allocator, .{ .text = suffix });
+    /// Returns one quote bar per level of `quote_depth`, followed by `suffix`.
+    fn quoteBars(self: *Builder, quote_depth: usize, suffix: []const u8) ![]Span {
+        const spans = try self.allocator.alloc(Span, quote_depth + @intFromBool(suffix.len > 0));
+        @memset(spans[0..quote_depth], .{ .text = "│ ", .style = .{ .fg = .{ .index = 6 } } });
+        if (suffix.len > 0) spans[quote_depth] = .{ .text = suffix };
+        return spans;
     }
 
     fn appendSections(
@@ -268,9 +278,9 @@ const Builder = struct {
 
     fn addTextBlock(self: *Builder, quote_depth: usize, text: []const u8, style: Style) !void {
         var spans: std.ArrayList(Span) = .empty;
-        try self.appendPrefix(&spans, quote_depth, "");
         try spans.append(self.allocator, .{ .text = text, .style = style });
-        try self.addBlock(&spans, 0, .normal);
+        const bars = try self.quoteBars(quote_depth, "");
+        try self.addBlock(&spans, .{ .prefix = bars, .continuation = bars });
     }
 
     /// Returns `url` with control characters percent-encoded, so backends
@@ -282,12 +292,11 @@ const Builder = struct {
         return output.toOwnedSlice();
     }
 
-    fn addBlock(self: *Builder, spans: *std.ArrayList(Span), gap_before: u8, kind: Block.Kind) !void {
-        try self.blocks.append(self.allocator, .{
-            .spans = try spans.toOwnedSlice(self.allocator),
-            .gap_before = gap_before,
-            .kind = kind,
-        });
+    /// Adds a block of `spans`, with the other fields from `block`.
+    fn addBlock(self: *Builder, spans: *std.ArrayList(Span), block: Block) !void {
+        var result = block;
+        result.spans = try spans.toOwnedSlice(self.allocator);
+        try self.blocks.append(self.allocator, result);
     }
 };
 
@@ -421,15 +430,21 @@ pub const WrapCursor = struct {
     col: usize = 0,
     soft_wrapped: bool = false,
     in_word: bool = false,
+    /// The text moved to a new row because the last one was full, and nothing
+    /// was written to the new row yet.
+    pending_wrap: bool = false,
 };
 
 /// Shown in place of a grapheme wider than the available width.
 const too_wide_marker = "…";
 
-/// Word-wraps `spans` to `width` columns, starting at `start`. Calls
-/// `visitor.glyph(row, col, grapheme, width, span)` for every cell it fills
-/// and stops early once that returns false. Calls `visitor.checkpoint(cursor)`
-/// before each word and grapheme, so wrapping can later resume there.
+/// Word-wraps `spans` to `width` columns, starting at `start`. The visitor gets:
+/// - `glyph(row, col, grapheme, width, span) bool` for every cell filled;
+///   wrapping stops early once it returns false.
+/// - `softWrap(row)` before the first glyph that continues the text of
+///   `row` on the next row, unlike text after a hard line break.
+/// - `checkpoint(cursor)` before each word and grapheme, so wrapping can
+///   later resume there.
 /// Returns the number of rows used, at least one.
 pub fn wrap(spans: []const Span, width: u16, measure: Measure, start: WrapCursor, visitor: anytype) usize {
     if (spans.len == 0) return 1;
@@ -437,6 +452,7 @@ pub fn wrap(spans: []const Span, width: u16, measure: Measure, start: WrapCursor
     var col = start.col;
     var soft_wrapped = start.soft_wrapped;
     var in_word = start.in_word;
+    var pending_wrap = start.pending_wrap;
     for (spans[start.span..], start.span..) |span, span_index| {
         var lines: TextLineIterator = .{
             .buf = span.text,
@@ -452,8 +468,11 @@ pub fn wrap(spans: []const Span, width: u16, measure: Measure, start: WrapCursor
                         if (col >= width) {
                             col = 0;
                             row += 1;
+                            pending_wrap = true;
                             break;
                         }
+                        if (pending_wrap) visitor.softWrap(row - 1);
+                        pending_wrap = false;
                         if (!visitor.glyph(row, col, " ", 1, span)) return row + 1;
                         col += 1;
                     }
@@ -467,12 +486,14 @@ pub fn wrap(spans: []const Span, width: u16, measure: Measure, start: WrapCursor
                         .col = col,
                         .soft_wrapped = soft_wrapped,
                         .in_word = in_word,
+                        .pending_wrap = pending_wrap,
                     });
                     if (!in_word) {
                         const word_width = measure.textWidth(word);
                         if (word_width + col > width and word_width <= width) {
                             row += 1;
                             col = 0;
+                            pending_wrap = true;
                         }
                     }
                     in_word = true;
@@ -486,12 +507,13 @@ pub fn wrap(spans: []const Span, width: u16, measure: Measure, start: WrapCursor
                             .col = col,
                             .soft_wrapped = soft_wrapped,
                             .in_word = true,
+                            .pending_wrap = pending_wrap,
                         });
                         first = false;
-                        soft_wrapped = false;
                         var bytes = word[grapheme.start..grapheme.end];
                         var grapheme_width = measure.width(bytes);
                         if (grapheme_width == 0) continue;
+                        soft_wrapped = false;
                         if (grapheme_width > width) {
                             if (width == 0) continue;
                             bytes = too_wide_marker;
@@ -500,21 +522,27 @@ pub fn wrap(spans: []const Span, width: u16, measure: Measure, start: WrapCursor
                         if (col != 0 and col + grapheme_width > width) {
                             row += 1;
                             col = 0;
+                            pending_wrap = true;
                         }
+                        if (pending_wrap) visitor.softWrap(row - 1);
+                        pending_wrap = false;
                         if (!visitor.glyph(row, col, bytes, grapheme_width, span)) return row + 1;
                         col += grapheme_width;
                         if (col >= width) {
                             row += 1;
                             col = 0;
                             soft_wrapped = true;
+                            pending_wrap = true;
                         }
                     }
                 },
             };
             if (lines.has_break) {
+                // A full row already moved the text to a new one.
+                if (!pending_wrap) row += 1;
+                pending_wrap = false;
                 soft_wrapped = false;
                 in_word = false;
-                row += 1;
                 col = 0;
             }
         }
@@ -528,6 +556,7 @@ pub fn measureHeight(spans: []const Span, width: u16, measure: Measure) usize {
         fn glyph(_: @This(), _: usize, _: usize, _: []const u8, _: u16, _: Span) bool {
             return true;
         }
+        fn softWrap(_: @This(), _: usize) void {}
         fn checkpoint(_: @This(), _: WrapCursor) void {}
     };
     return wrap(spans, width, measure, .{}, Ignore{});
@@ -548,6 +577,8 @@ fn measureCheckpoints(allocator: std.mem.Allocator, spans: []const Span, width: 
         fn glyph(self: *@This(), _: usize, _: usize, _: []const u8, _: u16, _: Span) bool {
             return !self.failed;
         }
+
+        fn softWrap(_: *@This(), _: usize) void {}
 
         fn checkpoint(self: *@This(), cursor: WrapCursor) void {
             if (cursor.row < self.next_row) return;
@@ -630,17 +661,6 @@ pub const LayoutOptions = struct {
     image_height: ?usize = null,
 };
 
-/// Returns the rows `block` takes, not counting `gap_before`.
-pub fn blockHeight(block: Block, options: LayoutOptions) usize {
-    return switch (block.kind) {
-        .rule => 1,
-        .normal, .code => measureHeight(block.spans, options.width, options.measure),
-        .image => options.image_height orelse measureHeight(block.spans, options.width, options.measure),
-        .table => |table| tableHeight(table, options.width, options.measure),
-        .heading => measureHeight(block.spans, options.width, options.measure) + headingExtraRows(block.kind),
-    };
-}
-
 /// The measured rows of one block, for painting it with `paintBlock`.
 pub const BlockLayout = struct {
     width: u16,
@@ -650,10 +670,14 @@ pub const BlockLayout = struct {
     /// For tables, the first row of the header and each body row, then the
     /// table height.
     table_rows: []const usize = &.{},
+    /// For tables, the checkpoints of every cell, header row first.
+    table_cells: []const []const WrapCursor = &.{},
 
     pub fn deinit(self: BlockLayout, allocator: std.mem.Allocator) void {
         allocator.free(self.checkpoints);
         allocator.free(self.table_rows);
+        for (self.table_cells) |checkpoints| allocator.free(checkpoints);
+        allocator.free(self.table_cells);
     }
 };
 
@@ -661,26 +685,69 @@ pub const BlockLayout = struct {
 pub fn layoutBlock(allocator: std.mem.Allocator, block: Block, options: LayoutOptions) !BlockLayout {
     switch (block.kind) {
         .rule => return .{ .width = options.width, .height = 1 },
-        .table => |table| {
-            if (!tableFits(table, options.width)) return .{ .width = options.width, .height = tableHeight(table, options.width, options.measure) };
-            const widths = tableColumnWidths(options.width, table.columns.len);
-            const rows = try allocator.alloc(usize, table.row_count + 2);
-            var row: usize = 1;
-            for (rows[0 .. table.row_count + 1], 0..) |*start, index| {
-                start.* = row;
-                row += tableRowHeight(table, widths, if (index == 0) null else index - 1, options.measure) + 1;
-            }
-            rows[table.row_count + 1] = row;
-            return .{ .width = options.width, .height = row, .table_rows = rows };
-        },
+        .table => |table| return layoutTable(allocator, table, options),
         .image => if (options.image_height) |height| return .{ .width = options.width, .height = height },
         .normal, .code, .heading => {},
     }
-    const text_height, const checkpoints = try measureCheckpoints(allocator, block.spans, options.width, options.measure);
+    const text_width = options.width -| prefixWidth(block, options.measure);
+    const text_height, const checkpoints = try measureCheckpoints(allocator, block.spans, text_width, options.measure);
     return .{
         .width = options.width,
         .height = text_height + headingExtraRows(block.kind),
         .checkpoints = checkpoints,
+    };
+}
+
+fn layoutTable(allocator: std.mem.Allocator, table: Table, options: LayoutOptions) !BlockLayout {
+    if (table.columns.len == 0) return .{ .width = options.width, .height = 0 };
+    if (!tableFits(table, options.width)) return .{ .width = options.width, .height = 1 };
+    const widths = tableColumnWidths(options.width, table.columns.len);
+
+    const rows = try allocator.alloc(usize, table.row_count + 2);
+    errdefer allocator.free(rows);
+    const cells = try allocator.alloc([]const WrapCursor, (table.row_count + 1) * table.columns.len);
+    @memset(cells, &.{});
+    errdefer {
+        for (cells) |checkpoints| allocator.free(checkpoints);
+        allocator.free(cells);
+    }
+
+    var row: usize = 1;
+    for (rows[0 .. table.row_count + 1], 0..) |*start, index| {
+        start.* = row;
+        var height: usize = 1;
+        for (table.columns, cells[index * table.columns.len ..][0..table.columns.len], 0..) |column, *checkpoints, column_index| {
+            const cell_height, checkpoints.* = try measureCheckpoints(
+                allocator,
+                tableCell(column, if (index == 0) null else index - 1),
+                widths.width(column_index) -| 2,
+                options.measure,
+            );
+            height = @max(height, cell_height);
+        }
+        row += height + 1;
+    }
+    rows[table.row_count + 1] = row;
+    return .{ .width = options.width, .height = row, .table_rows = rows, .table_cells = cells };
+}
+
+/// Returns the columns left of the text of `block`.
+fn prefixWidth(block: Block, measure: Measure) u16 {
+    const width = @max(spansWidth(block.prefix, measure), spansWidth(block.continuation, measure));
+    return @intCast(@min(width, std.math.maxInt(u16)));
+}
+
+fn spansWidth(spans: []const Span, measure: Measure) usize {
+    var width: usize = 0;
+    for (spans) |span| width += measure.textWidth(span.text);
+    return width;
+}
+
+/// Returns the block row of the first text row.
+fn textRowOffset(kind: Block.Kind) usize {
+    return switch (kind) {
+        .heading => |level| @intFromBool(level == 1),
+        else => 0,
     };
 }
 
@@ -737,15 +804,14 @@ pub const Layout = struct {
         if (self.key) |current| if (std.meta.eql(current, key)) return;
         self.key = null;
         self.clear(allocator);
+        try self.starts.ensureTotalCapacity(allocator, blocks.len);
+        try self.blocks.ensureTotalCapacity(allocator, blocks.len);
         var total: usize = 0;
         for (blocks) |block| {
             total += block.gap_before;
-            try self.starts.append(allocator, total);
             const block_layout = try layoutBlock(allocator, block, options);
-            self.blocks.append(allocator, block_layout) catch |err| {
-                block_layout.deinit(allocator);
-                return err;
-            };
+            self.starts.appendAssumeCapacity(total);
+            self.blocks.appendAssumeCapacity(block_layout);
             total += block_layout.height;
         }
         self.total_rows = total;
@@ -802,16 +868,6 @@ fn tableColumnWidths(total_width: u16, columns: usize) TableWidths {
 
 fn tableFits(table: Table, width: u16) bool {
     return table.columns.len > 0 and width >= table.columns.len * 4 + 1;
-}
-
-fn tableHeight(table: Table, width: u16, measure: Measure) usize {
-    if (table.columns.len == 0) return 0;
-    if (!tableFits(table, width)) return 1;
-    const widths = tableColumnWidths(width, table.columns.len);
-    var height: usize = 2;
-    height += tableRowHeight(table, widths, null, measure);
-    for (0..table.row_count) |row| height += tableRowHeight(table, widths, row, measure) + 1;
-    return height;
 }
 
 fn tableRowHeight(table: Table, widths: TableWidths, row: ?usize, measure: Measure) usize {
@@ -889,18 +945,41 @@ pub fn paintBlock(region: Region, block: Block, block_layout: BlockLayout, skipp
     const checkpoints = if (fits) block_layout.checkpoints else &.{};
     switch (block.kind) {
         .rule => if (skipped_rows == 0) paintRule(region),
+        .table => |table| paintTable(
+            region,
+            table,
+            if (fits) block_layout.table_rows else &.{},
+            if (fits) block_layout.table_cells else &.{},
+            skipped_rows,
+            measure,
+        ),
         .heading => |level| {
             paintHeadingBackground(region, level);
-            paintSpansFrom(region, block.spans, checkpoints, skipped_rows, if (level == 1) 1 else 0, 0, measure);
-            if (level == 2) paintHeadingDivider(region, block_layout.height, skipped_rows);
+            const text = paintPrefix(region, block, skipped_rows, measure);
+            paintSpansFrom(text, block.spans, checkpoints, skipped_rows, textRowOffset(block.kind), 0, measure);
+            if (level == 2) paintHeadingDivider(text, block_layout.height, skipped_rows);
         },
         .code => {
             region.fill(.{ .style = .{ .bg = .{ .index = 0 } } });
-            paintSpansFrom(region, block.spans, checkpoints, skipped_rows, 0, 0, measure);
+            paintSpansFrom(paintPrefix(region, block, skipped_rows, measure), block.spans, checkpoints, skipped_rows, 0, 0, measure);
         },
-        .table => |table| paintTable(region, table, if (fits) block_layout.table_rows else &.{}, skipped_rows, measure),
-        .image, .normal => paintSpansFrom(region, block.spans, checkpoints, skipped_rows, 0, 0, measure),
+        .image, .normal => paintSpansFrom(paintPrefix(region, block, skipped_rows, measure), block.spans, checkpoints, skipped_rows, 0, 0, measure),
     }
+}
+
+/// Paints `block.prefix` and `block.continuation` down the left of `region`,
+/// which shows the block from row `skipped_rows` on. Returns the region
+/// right of them, where the text of the block goes.
+pub fn paintPrefix(region: Region, block: Block, skipped_rows: usize, measure: Measure) Region {
+    const width = prefixWidth(block, measure);
+    if (width == 0) return region;
+    const first_row = textRowOffset(block.kind);
+    const column = region.child(.{ .width = width });
+    for (0..column.height) |screen_row| {
+        const spans = if (skipped_rows + screen_row == first_row) block.prefix else block.continuation;
+        paintSpans(column.child(.{ .y_off = @intCast(screen_row), .height = 1 }), spans, 0, 0, 0, measure);
+    }
+    return region.child(.{ .x_off = width });
 }
 
 /// Paints wrapped `spans` into `region`, which shows them from row `skipped_rows` on.
@@ -924,28 +1003,35 @@ fn paintSpansFrom(
         region: Region,
         skipped_rows: usize,
         row_offset: usize,
+        /// The last cell written, which `softWrap` marks as continuing.
+        last: ?struct { col: u16, row: u16, text_row: usize, cell: Cell } = null,
 
-        fn glyph(self: @This(), text_row: usize, col: usize, grapheme: []const u8, width: u16, span: Span) bool {
+        fn glyph(self: *@This(), text_row: usize, col: usize, grapheme: []const u8, width: u16, span: Span) bool {
             const row = text_row + self.row_offset;
             if (row >= self.skipped_rows + self.region.height) return false;
             if (row < self.skipped_rows or col >= self.region.width) return true;
-            self.region.writeCell(@intCast(col), @intCast(row - self.skipped_rows), .{
-                .grapheme = grapheme,
-                .width = @intCast(width),
-                .style = span.style,
-                .link = span.link,
-                .wrapped = col + width >= self.region.width,
-            });
+            const cell: Cell = .{ .grapheme = grapheme, .width = @intCast(width), .style = span.style, .link = span.link };
+            self.last = .{ .col = @intCast(col), .row = @intCast(row - self.skipped_rows), .text_row = text_row, .cell = cell };
+            self.region.writeCell(@intCast(col), @intCast(row - self.skipped_rows), cell);
             return true;
         }
 
-        fn checkpoint(_: @This(), _: WrapCursor) void {}
+        fn softWrap(self: *@This(), text_row: usize) void {
+            const last = self.last orelse return;
+            if (last.text_row != text_row or last.col + last.cell.width < self.region.width) return;
+            var cell = last.cell;
+            cell.wrapped = true;
+            self.region.writeCell(last.col, last.row, cell);
+        }
+
+        fn checkpoint(_: *@This(), _: WrapCursor) void {}
     };
-    _ = wrap(spans, region.width, measure, resumeCursor(checkpoints, skipped_rows -| row_offset, col_offset), Painter{
+    var painter: Painter = .{
         .region = region,
         .skipped_rows = skipped_rows,
         .row_offset = row_offset,
-    });
+    };
+    _ = wrap(spans, region.width, measure, resumeCursor(checkpoints, skipped_rows -| row_offset, col_offset), &painter);
 }
 
 const border_style: Style = .{ .fg = .{ .index = 8 } };
@@ -970,15 +1056,15 @@ fn paintHeadingDivider(region: Region, height: usize, skipped_rows: usize) void 
 
 const TableBorderKind = enum { top, middle, bottom };
 
-/// `rows` holds the row starts from `layoutBlock`, or is empty to measure rows while painting.
-fn paintTable(region: Region, table: Table, rows: []const usize, skipped_rows: usize, measure: Measure) void {
+/// `rows` and `cells` come from `layoutBlock`, or are empty to measure while painting.
+fn paintTable(region: Region, table: Table, rows: []const usize, cells: []const []const WrapCursor, skipped_rows: usize, measure: Measure) void {
     if (!tableFits(table, region.width)) {
         if (skipped_rows == 0) paintSpans(region, &.{.{ .text = "[table too wide for terminal]", .style = .{ .dim = true } }}, 0, 0, 0, measure);
         return;
     }
 
     const widths = tableColumnWidths(region.width, table.columns.len);
-    const measured = rows.len == table.row_count + 2;
+    const measured = rows.len == table.row_count + 2 and cells.len == (table.row_count + 1) * table.columns.len;
     paintVisibleTableBorder(region, 0, skipped_rows, widths, .top);
     var index: usize = if (measured) firstTableRow(rows, skipped_rows) else 0;
     var block_row: usize = if (measured) rows[index] else 1;
@@ -986,7 +1072,8 @@ fn paintTable(region: Region, table: Table, rows: []const usize, skipped_rows: u
         if (block_row >= skipped_rows + region.height) break;
         const row_index: ?usize = if (index == 0) null else index - 1;
         const height = if (measured) rows[index + 1] - rows[index] - 1 else tableRowHeight(table, widths, row_index, measure);
-        paintVisibleTableRow(region, block_row, skipped_rows, table, widths, row_index, height, measure);
+        const row_cells = if (measured) cells[index * table.columns.len ..][0..table.columns.len] else &.{};
+        paintVisibleTableRow(region, block_row, skipped_rows, table, widths, row_index, row_cells, height, measure);
         block_row += height;
         paintVisibleTableBorder(region, block_row, skipped_rows, widths, if (index == table.row_count) .bottom else .middle);
         block_row += 1;
@@ -1016,6 +1103,8 @@ fn paintVisibleTableRow(
     table: Table,
     widths: TableWidths,
     row_index: ?usize,
+    /// The checkpoints of each cell in the row, or empty.
+    row_cells: []const []const WrapCursor,
     height: usize,
     measure: Measure,
 ) void {
@@ -1027,10 +1116,18 @@ fn paintVisibleTableRow(
         .y_off = @intCast(screen_row),
         .height = @intCast(@min(height - skipped, region.height - screen_row)),
     });
-    paintTableRow(row_region, table, widths, row_index, skipped, measure);
+    paintTableRow(row_region, table, widths, row_index, row_cells, skipped, measure);
 }
 
-fn paintTableRow(region: Region, table: Table, widths: TableWidths, row_index: ?usize, skipped: usize, measure: Measure) void {
+fn paintTableRow(
+    region: Region,
+    table: Table,
+    widths: TableWidths,
+    row_index: ?usize,
+    row_cells: []const []const WrapCursor,
+    skipped: usize,
+    measure: Measure,
+) void {
     const fill_style: Style = if (row_index) |index|
         if (index % 2 == 1) .{ .bg = .{ .index = 0 } } else .{}
     else
@@ -1054,24 +1151,31 @@ fn paintTableRow(region: Region, table: Table, widths: TableWidths, row_index: ?
         const spans = tableCell(column, row_index);
         const content = cell.child(.{ .x_off = 1, .width = cell.width -| 2 });
         const col_offset = tableTextOffset(content.width, spans, column.alignment, measure);
-        paintSpans(content, spans, skipped, 0, col_offset, measure);
+        paintSpansFrom(content, spans, if (row_cells.len > 0) row_cells[index] else &.{}, skipped, 0, col_offset, measure);
     }
 }
 
 fn tableTextOffset(width: u16, spans: []const Span, alignment: markdown.Node.Column.Alignment, measure: Measure) u16 {
     const Extent = struct {
         end: usize = 0,
+        multiline: bool = false,
 
-        fn glyph(self: *@This(), _: usize, col: usize, _: []const u8, glyph_width: u16, _: Span) bool {
+        fn glyph(self: *@This(), row: usize, col: usize, _: []const u8, glyph_width: u16, _: Span) bool {
+            if (row > 0) {
+                self.multiline = true;
+                return false;
+            }
             self.end = @max(self.end, col + glyph_width);
             return true;
         }
 
+        fn softWrap(_: *@This(), _: usize) void {}
         fn checkpoint(_: *@This(), _: WrapCursor) void {}
     };
     if (alignment == .left) return 0;
     var extent: Extent = .{};
-    if (wrap(spans, width, measure, .{}, &extent) != 1) return 0;
+    _ = wrap(spans, width, measure, .{}, &extent);
+    if (extent.multiline) return 0;
     const remaining: u16 = @intCast(width -| extent.end);
     return if (alignment == .center) remaining / 2 else remaining;
 }
@@ -1328,7 +1432,7 @@ test "extreme table cells paint visible slices" {
         .values = &values,
     }};
     const table: Table = .{ .columns = &columns, .row_count = 1 };
-    paintVisibleTableRow(grid.region(), 0, 65_536, table, tableColumnWidths(5, 1), 0, 70_000, .unicode);
+    paintVisibleTableRow(grid.region(), 0, 65_536, table, tableColumnWidths(5, 1), 0, &.{}, 70_000, .unicode);
     try std.testing.expectEqualStrings("a", grid.row(0)[2].grapheme);
 }
 
@@ -1506,4 +1610,76 @@ test "measured widths are clamped to cell widths" {
 
 test "wide renders allocate a bounded grid" {
     try expectRender("hi", .{ .width = std.math.maxInt(u16), .color = false }, "hi\n");
+}
+
+test "a full row before a hard break does not add a blank row" {
+    try std.testing.expectEqual(@as(usize, 2), measureHeight(&.{.{ .text = "abc\nd" }}, 3, .unicode));
+    try std.testing.expectEqual(@as(usize, 2), measureHeight(&.{.{ .text = "ab  \nd" }}, 3, .unicode));
+    try std.testing.expectEqual(@as(usize, 3), measureHeight(&.{.{ .text = "abc\n\nd" }}, 3, .unicode));
+    try std.testing.expectEqual(@as(usize, 1), measureHeight(&.{.{ .text = "abc" }}, 3, .unicode));
+}
+
+test "only rows that continue are marked as wrapped" {
+    var grid = try testGrid(3, 3);
+    defer grid.deinit(std.testing.allocator);
+    paintSpans(grid.region(), &.{.{ .text = "abcdef\nghi" }}, 0, 0, 0, .unicode);
+    try std.testing.expect(grid.row(0)[2].wrapped);
+    try std.testing.expect(!grid.row(1)[2].wrapped);
+    try std.testing.expect(!grid.row(2)[2].wrapped);
+    try std.testing.expectEqualStrings("g", gridText(grid, 2));
+}
+
+test "layout stays consistent when measuring fails" {
+    var text: [400]u8 = undefined;
+    for (&text, 0..) |*byte, index| byte.* = if (index % 2 == 0) 'a' else ' ';
+    const blocks = [_]Block{
+        .{ .spans = &.{.{ .text = &text }} },
+        .{ .spans = &.{.{ .text = &text }} },
+    };
+    var failures: usize = 0;
+    for (0..12) |fail_index| {
+        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
+        var layout: Layout = .{};
+        defer layout.deinit(failing.allocator());
+        layout.update(failing.allocator(), &blocks, .{ .width = 1 }) catch {
+            failures += 1;
+            try std.testing.expectEqual(layout.starts.items.len, layout.blocks.items.len);
+            _ = layout.firstVisible(1_000);
+        };
+    }
+    try std.testing.expect(failures > 2);
+}
+
+test "tall table cells paint from checkpoints" {
+    const word = try std.testing.allocator.alloc(u8, 5_000);
+    defer std.testing.allocator.free(word);
+    @memset(word, 'a');
+    const values = [_][]const Span{&.{.{ .text = word }}};
+    const columns = [_]Table.Column{.{ .alignment = .center, .header = &.{.{ .text = "H" }}, .values = &values }};
+    const table: Block = .{ .kind = .{ .table = .{ .columns = &columns, .row_count = 1 } } };
+    const block_layout = try layoutBlock(std.testing.allocator, table, .{ .width = 7 });
+    defer block_layout.deinit(std.testing.allocator);
+    try std.testing.expect(block_layout.table_cells[1].len > 10);
+    for ([_]usize{ 0, 3, 64, 1000, 1667 }) |skipped| try expectSameRows(table, 7, skipped, 10);
+}
+
+test "wrapped rows keep quote bars and list indents" {
+    try expectRender(
+        \\> aaa bbb ccc
+    , .{ .width = 7, .color = false },
+        \\│ aaa
+        \\│ bbb
+        \\│ ccc
+        \\
+    );
+    try expectRender(
+        \\- aaa bbb
+        \\  - ccc ddd
+    , .{ .width = 7, .color = false },
+        \\• aaa
+        \\  bbb
+        \\  • ccc
+        \\    ddd
+        \\
+    );
 }

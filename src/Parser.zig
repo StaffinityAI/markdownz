@@ -393,6 +393,9 @@ test "underline extension changes double underscore semantics" {
 
     const underline = try parse(arena.allocator(), "__text__", .{ .underline_extension = true });
     try std.testing.expect(underline[0].text[0] == .underline);
+
+    const asterisks = try parse(arena.allocator(), "**text**", .{ .underline_extension = true });
+    try std.testing.expect(asterisks[0].text[0] == .bold);
 }
 
 test "links parse title URL and hover text" {
@@ -1380,7 +1383,7 @@ const Context = struct {
 
                         try arr.append(
                             arena,
-                            if (options.underline_extension) .{
+                            if (options.underline_extension and c == '_') .{
                                 .underline = try parseLineText(arena, text, options),
                             } else .{
                                 .bold = try parseLineText(arena, text, options),

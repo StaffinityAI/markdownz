@@ -104,8 +104,9 @@ Styled output uses SGR escape sequences and OSC 8 hyperlinks. `term.renderAlloc`
 TUIs can use the steps behind `render` directly:
 
 - `term.build(arena, nodes)` returns a `Document` of styled blocks.
-- `term.Layout` stores the row offset and height of every block for a width, and finds the first visible block for a scroll position.
-- `term.paintBlock(region, block, height, skipped_rows, measure)` draws the visible rows of a block onto a `Region` of any `Surface`, which receives cells through one callback.
+- `term.Layout` stores the row offset and `BlockLayout` of every block, and finds the first visible block for a scroll position. It recomputes when the blocks, width, image height or measure function change. Call `invalidate` when block contents or the measure's results change in place.
+- `term.paintBlock(region, block, block_layout, skipped_rows, measure)` draws the visible rows of a block onto a `Region` of any `Surface`, which receives cells through one callback. `block_layout` comes from `layout.blocks.items[i]` or `term.layoutBlock`, measured for `region.width`.
+- `term.paintPrefix` draws only a block's quote bars and list indent and returns the region for its content, for blocks a TUI draws itself, such as images.
 - `term.Measure` returns grapheme widths. The default uses Unicode properties from uucode. Pass the TUI library's width function so wrapping matches what it draws.
 
 The Vaxis example shows a Surface and Measure for libvaxis. It builds libvaxis with its own `external_uucode` option so both use one uucode module.

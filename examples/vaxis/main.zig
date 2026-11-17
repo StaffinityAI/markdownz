@@ -68,6 +68,7 @@ pub fn main(init: std.process.Init) !void {
     var scroll: usize = 0;
     var layout: term.Layout = .{};
     defer layout.deinit(init.gpa);
+    var width_method = vx.screen.width_method;
     while (true) {
         const event = try loop.nextEvent();
         switch (event) {
@@ -101,6 +102,11 @@ pub fn main(init: std.process.Init) !void {
         const body_width = win.width -| (outer_margin * 2) -| 1;
         const content_height = win.height -| 2;
         const measure = windowMeasure(win);
+        // The layout cache sees the measure's context pointer, not the method it points to.
+        if (win.screen.width_method != width_method) {
+            width_method = win.screen.width_method;
+            layout.invalidate();
+        }
         try layout.update(init.gpa, document.blocks, .{
             .width = body_width,
             .measure = measure,
@@ -196,14 +202,18 @@ fn drawDocument(
             });
             const region = windowRegion(&visible_window);
             switch (block.kind) {
-                .image => if (visible_start == 0 and visible_window.height == height) {
-                    if (images[index]) |loaded| {
-                        loaded.draw(visible_window, .{ .scale = .contain }) catch drawImageFallback(region, block.spans, measure);
+                .image => {
+                    const content = term.paintPrefix(region, block, visible_start, measure);
+                    const image_window = visible_window.child(.{ .x_off = content.x - region.x });
+                    if (visible_start == 0 and visible_window.height == height) {
+                        if (images[index]) |loaded| {
+                            loaded.draw(image_window, .{ .scale = .contain }) catch drawImageFallback(content, block.spans, measure);
+                        } else {
+                            drawImageFallback(content, block.spans, measure);
+                        }
                     } else {
-                        drawImageFallback(region, block.spans, measure);
+                        drawClippedImagePlaceholder(content, block.spans, visible_start, images[index] != null, measure);
                     }
-                } else {
-                    drawClippedImagePlaceholder(region, block.spans, visible_start, images[index] != null, measure);
                 },
                 else => term.paintBlock(region, block, block_layout, visible_start, measure),
             }
