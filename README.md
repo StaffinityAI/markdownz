@@ -19,6 +19,7 @@ Add the modules you need in `build.zig`:
 const markdown_dep = b.dependency("markdown", .{
     .target = target,
     .optimize = optimize,
+    .terminal = true, // only needed for markdown-term
 });
 
 const imports: []const std.Build.Module.Import = &.{
@@ -30,15 +31,7 @@ const imports: []const std.Build.Module.Import = &.{
 
 Import only `markdown` if HTML rendering is not needed. The separate renderer module adds no code to parser-only consumers.
 
-`markdown-term` depends on [uucode](https://github.com/jacobsandlund/uucode), a lazy dependency that is fetched only when the bundled copy is used. To keep uucode out of a parser-only build entirely, disable the terminal module:
-
-```zig
-const markdown_dep = b.dependency("markdown", .{
-    .target = target,
-    .optimize = optimize,
-    .terminal = false,
-});
-```
+`markdown-term` depends on [uucode](https://github.com/jacobsandlund/uucode) and is only exposed with `.terminal = true`. uucode is a lazy dependency, so builds without the terminal module never fetch it.
 
 To share a uucode module you already have, for example the one given to libvaxis, pass `.external_uucode = true` and add the import yourself:
 
@@ -46,6 +39,7 @@ To share a uucode module you already have, for example the one given to libvaxis
 const markdown_dep = b.dependency("markdown", .{
     .target = target,
     .optimize = optimize,
+    .terminal = true,
     .external_uucode = true,
 });
 markdown_dep.module("markdown-term").addImport("uucode", uucode_module);
@@ -139,7 +133,7 @@ zig build run-gui -Ddvui=true
 Render Markdown to standard output:
 
 ```sh
-zig build run-cli -- [--width N] [--color auto|always|never] [file.md]
+zig build run-cli -Dterminal=true -- [--width N] [--color auto|always|never] [file.md]
 ```
 
 Run the Vaxis terminal viewer:
@@ -154,12 +148,13 @@ Run the http.zig web example, then open `http://localhost:8801/`:
 zig build run-web -Dhttp=true
 ```
 
-DVUI, Vaxis, and http.zig are lazy dependencies and are fetched only when their option is enabled. The DVUI and Vaxis viewers also accept a Markdown file after `--`.
+DVUI, Vaxis, http.zig, and uucode are lazy dependencies and are fetched only when their option is enabled. `-Dvaxis=true` also enables `-Dterminal`. The DVUI and Vaxis viewers also accept a Markdown file after `--`.
 
 ## Testing
 
 ```sh
 zig build test
+zig build test -Dterminal=true
 zig build test -Doptimize=ReleaseSafe
 zig build test-compile -Dtarget=x86_64-linux-gnu
 ```

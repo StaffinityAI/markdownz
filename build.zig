@@ -6,7 +6,9 @@ pub fn build(b: *std.Build) void {
     const enable_dvui = b.option(bool, "dvui", "Enable the DVUI compatibility module, viewer, and tests") orelse false;
     const enable_vaxis = b.option(bool, "vaxis", "Enable the Vaxis viewer and tests") orelse false;
     const enable_http = b.option(bool, "http", "Enable the http.zig web example") orelse false;
-    const enable_terminal = b.option(bool, "terminal", "Expose the markdown-term module, which depends on uucode") orelse true;
+    // Off by default so parser-only consumers never fetch uucode. The Vaxis
+    // viewer is built on markdown-term, so enabling it enables the module too.
+    const enable_terminal = b.option(bool, "terminal", "Expose the markdown-term module, which depends on uucode") orelse enable_vaxis;
     const external_uucode = b.option(bool, "external_uucode", "Expose markdown-term without uucode; the consumer adds its own uucode import") orelse false;
 
     const markdown = b.addModule("markdown", .{

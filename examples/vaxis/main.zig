@@ -184,7 +184,8 @@ fn drawDocument(
     while (index < document.blocks.len) : (index += 1) {
         const block = document.blocks[index];
         const block_row = layout.starts.items[index];
-        const height = layout.heights.items[index];
+        const block_layout = layout.blocks.items[index];
+        const height = block_layout.height;
         const block_end = block_row + height;
         if (block_end > scroll and block_row < scroll + viewport.height) {
             const visible_start = scroll -| block_row;
@@ -204,7 +205,7 @@ fn drawDocument(
                 } else {
                     drawClippedImagePlaceholder(region, block.spans, visible_start, images[index] != null, measure);
                 },
-                else => term.paintBlock(region, block, height, visible_start, measure),
+                else => term.paintBlock(region, block, block_layout, visible_start, measure),
             }
         }
         if (block_end >= scroll + viewport.height) break;
