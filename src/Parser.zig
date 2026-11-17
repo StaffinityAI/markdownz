@@ -103,6 +103,17 @@ test "plain text and UTF-8 BOM" {
     try expectDefaultText(nodes[0], "hello");
 }
 
+test "unclosed links and images are text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    for ([_][]const u8{ "[a", "x [WIP", "![a", "[a](b", "[\xa4" }) |source| {
+        const nodes = try parse(arena.allocator(), source, .{});
+        try std.testing.expectEqual(@as(usize, 1), nodes.len);
+        try std.testing.expect(nodes[0].* == .text);
+    }
+}
+
 test "CRLF preserves the final character" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1100,6 +1111,15 @@ const Context = struct {
         try ctx.appendNode(arena, node);
     }
 
+    /// The bytes up to `delimiter`, leaving the delimiter unread. Unlike
+    /// `takeDelimiterExclusive`, fails when the line has no `delimiter`, so
+    /// callers can toss it.
+    fn takeUntil(reader: *std.Io.Reader, delimiter: u8) std.Io.Reader.DelimiterError![]u8 {
+        const inclusive = try reader.peekDelimiterInclusive(delimiter);
+        reader.toss(inclusive.len - 1);
+        return inclusive[0 .. inclusive.len - 1];
+    }
+
     fn makeDefaultSection(reader: *Reader) Node.Section {
         return .{ .default = reader.io_reader.buffer[reader.start..reader.io_reader.seek] };
     }
@@ -1107,12 +1127,12 @@ const Context = struct {
     const ParseLinkSectionError = error{ InvalidMarkdownFile, OutOfMemory } || std.Io.Reader.DelimiterError;
 
     fn parseLinkSection(arena: std.mem.Allocator, reader: *Reader, as: enum(u1) { image, link }, options: Options) ParseLinkSectionError!Node.Section {
-        const alt_text = try reader.io_reader.takeDelimiterExclusive(']');
+        const alt_text = try takeUntil(&reader.io_reader, ']');
         reader.io_reader.toss(1);
 
         if (try reader.io_reader.takeByte() != '(') return error.InvalidMarkdownFile;
 
-        const contents = try reader.io_reader.takeDelimiterExclusive(')');
+        const contents = try takeUntil(&reader.io_reader, ')');
         const content = switch (options.mode) {
             .loose => std.mem.trim(u8, contents, " \t"),
             .strict => strict: {
