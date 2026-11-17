@@ -119,6 +119,23 @@ test "unclosed links and images are text" {
     try expectTextContentSections(mixed[0].text[1..], " [c");
 }
 
+test "colons in prose are not emoji shortcodes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const linked = try parse(arena.allocator(), "Note: see [docs](https://example.com).", .{});
+    try std.testing.expectEqual(@as(usize, 0), countSectionTag(linked[0].text, .emoji_shortcode));
+    try std.testing.expectEqual(@as(usize, 1), countSectionTag(linked[0].text, .link));
+
+    for ([_][]const u8{ "a: b: c", "time 10:30:00", "x :a b: y", "a:smile:b", "x:+1:" }) |source| {
+        const nodes = try parse(arena.allocator(), source, .{});
+        try expectTextContent(nodes[0], source);
+    }
+
+    const mixed = try parse(arena.allocator(), "Note: :smile: and :+1:", .{});
+    try std.testing.expectEqual(@as(usize, 2), countSectionTag(mixed[0].text, .emoji_shortcode));
+}
+
 test "unclosed emphasis and emoji shortcodes are text" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1203,6 +1220,17 @@ const Context = struct {
         try ctx.appendNode(arena, node);
     }
 
+    /// An emoji shortcode's name, like `smile` or `+1`: no spaces or
+    /// punctuation, so prose between two colons stays text.
+    fn isShortcodeName(text: []const u8) bool {
+        if (text.len == 0) return false;
+        for (text) |c| switch (c) {
+            'a'...'z', 'A'...'Z', '0'...'9', '_', '+', '-' => {},
+            else => return false,
+        };
+        return true;
+    }
+
     fn makeDefaultSection(reader: *Reader) Node.Section {
         return .{ .default = reader.io_reader.buffer[reader.start..reader.io_reader.seek] };
     }
@@ -1441,7 +1469,15 @@ const Context = struct {
             ':' => {
                 const seek_pos = reader.io_reader.seek;
                 const text: []const u8 = reader.takeExclusive(":") catch "";
-                if (text.len == 0) {
+                const buffer = reader.io_reader.buffer[0..reader.io_reader.end];
+                // At word boundaries, so "10:30:00" stays text.
+                const after = reader.io_reader.seek + 1;
+                const bounded = (seek_pos < 2 or !std.ascii.isAlphanumeric(buffer[seek_pos - 2])) and
+                    (after >= buffer.len or !std.ascii.isAlphanumeric(buffer[after]));
+                if (!bounded or !isShortcodeName(text)) {
+                    // Prose with two colons on a line ("Note: see https://..."):
+                    // the first stays text and the scan resumes after it.
+                    reader.io_reader.seek = seek_pos;
                     const next_byte_inner = reader.io_reader.takeByte() catch {
                         try arr.append(arena, makeDefaultSection(&reader));
                         break :loop;
