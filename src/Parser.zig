@@ -114,6 +114,18 @@ test "unclosed links and images are text" {
     }
 }
 
+test "blank lines separate paragraphs outside headings too" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "one\ntwo\n\nthree\n", .{});
+    try std.testing.expectEqual(@as(usize, 4), nodes.len);
+    try expectDefaultText(nodes[0], "one");
+    try expectDefaultText(nodes[1], "two");
+    try std.testing.expect(nodes[2].* == .line_break);
+    try expectDefaultText(nodes[3], "three");
+}
+
 test "CRLF preserves the final character" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -209,9 +221,10 @@ test "whitespace-only lines are blank" {
     defer arena.deinit();
 
     const nodes = try parse(arena.allocator(), "first\n   \n\t\nsecond\n", .{});
-    try std.testing.expectEqual(@as(usize, 2), nodes.len);
+    try std.testing.expectEqual(@as(usize, 3), nodes.len);
     try expectDefaultText(nodes[0], "first");
-    try expectDefaultText(nodes[1], "second");
+    try std.testing.expect(nodes[1].* == .line_break);
+    try expectDefaultText(nodes[2], "second");
 }
 
 test "whitespace-only lines reset block state" {
@@ -248,7 +261,8 @@ test "setext headings require adjacency and follow heading hierarchy" {
 
     const separated = try parse(arena.allocator(), "title\n\n---\n", .{});
     try std.testing.expect(separated[0].* == .text);
-    try std.testing.expect(separated[1].* == .horizontal_rule);
+    try std.testing.expect(separated[1].* == .line_break);
+    try std.testing.expect(separated[2].* == .horizontal_rule);
 
     const siblings = try parse(arena.allocator(), "# first\nsecond\n===\n", .{});
     try std.testing.expectEqual(@as(usize, 2), siblings.len);
@@ -1586,16 +1600,17 @@ const Context = struct {
         if (ctx.previous_node) |node| {
             if (node.* == .table) ctx.previous_node = null;
         }
+        // A blank line after a paragraph separates it from what follows,
+        // under a heading or not.
+        const node = ctx.previous_node orelse return;
+        if (node.* != .text) return;
+        const new_node = try arena.create(Node);
+        new_node.* = .line_break;
+        ctx.previous_node = new_node;
         if (ctx.previous_heading) |heading| {
-            if (ctx.previous_node) |node| switch (node.*) {
-                .text => {
-                    const new_node = try arena.create(Node);
-                    new_node.* = .line_break;
-                    ctx.previous_node = new_node;
-                    try heading.heading.children.append(arena, new_node);
-                },
-                else => {},
-            };
+            try heading.heading.children.append(arena, new_node);
+        } else {
+            try ctx.graph.append(arena, new_node);
         }
     }
 

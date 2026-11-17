@@ -1522,6 +1522,7 @@ test "plain rendering wraps paragraphs and lists" {
         \\Some words
         \\that wrap
         \\here.
+        \\
         \\• one
         \\[x] done
         \\
