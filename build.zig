@@ -6,6 +6,10 @@ pub fn build(b: *std.Build) void {
     const enable_dvui = b.option(bool, "dvui", "Enable the DVUI compatibility module, viewer, and tests") orelse false;
     const enable_vaxis = b.option(bool, "vaxis", "Enable the Vaxis viewer and tests") orelse false;
     const enable_http = b.option(bool, "http", "Enable the http.zig web example") orelse false;
+    // Off by default so parser-only consumers never fetch uucode. The Vaxis
+    // viewer is built on markdown-term, so enabling it enables the module too.
+    const enable_terminal = b.option(bool, "terminal", "Expose the markdown-term module, which depends on uucode") orelse enable_vaxis;
+    const external_uucode = b.option(bool, "external_uucode", "Expose markdown-term without uucode; the consumer adds its own uucode import") orelse false;
 
     const markdown = b.addModule("markdown", .{
         .root_source_file = b.path("src/Parser.zig"),
@@ -20,6 +24,41 @@ pub fn build(b: *std.Build) void {
             .{ .name = "markdown", .module = markdown },
         },
     });
+
+    // An external uucode must provide the same fields. libvaxis needs them as
+    // well and is built against this module so both measure text the same way.
+    const uucode: ?*std.Build.Module = if (enable_terminal and !external_uucode) blk: {
+        const uucode_dep = b.lazyDependency("uucode", .{
+            .target = target,
+            .optimize = optimize,
+            .fields = @as([]const []const u8, &.{
+                "east_asian_width",
+                "grapheme_break",
+                "general_category",
+                "is_emoji_presentation",
+            }),
+        }) orelse break :blk null;
+        break :blk uucode_dep.module("uucode");
+    } else null;
+    const markdown_term: ?*std.Build.Module = if (enable_terminal) blk: {
+        const module = b.addModule("markdown-term", .{
+            .root_source_file = b.path("src/TerminalRenderer.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "markdown", .module = markdown },
+            },
+        });
+        if (uucode) |mod| module.addImport("uucode", mod);
+        break :blk module;
+    } else null;
+    // Terminal tests and examples need the bundled uucode.
+    const terminal_unavailable: ?[]const u8 = if (!enable_terminal)
+        "markdown-term is disabled; rerun with -Dterminal=true"
+    else if (external_uucode)
+        "markdown-term uses an external uucode; rerun without -Dexternal_uucode"
+    else
+        null;
     const default_document = b.createModule(.{
         .root_source_file = b.path("examples/default_document.zig"),
         .target = target,
@@ -55,6 +94,9 @@ pub fn build(b: *std.Build) void {
     test_compile_step.dependOn(&fixture_tests.step);
     test_compile_step.dependOn(&html_tests.step);
 
+    const cli_example_step = b.step("cli-example", "Build the terminal CLI example");
+    const run_cli_example_step = b.step("run-cli", "Render markdown to the terminal with the CLI example");
+
     const viewer_step = b.step("dvui-viewer", "Build the DVUI markdown viewer example");
     const run_viewer_step = b.step("run-gui", "Run the DVUI markdown viewer example");
     const vaxis_viewer_step = b.step("vaxis-viewer", "Build the Vaxis markdown viewer example");
@@ -67,10 +109,40 @@ pub fn build(b: *std.Build) void {
         viewer_step.dependOn(&disabled.step);
         run_viewer_step.dependOn(&disabled.step);
     }
-    if (!enable_vaxis) {
-        const disabled = b.addFail("Vaxis support is disabled; rerun with -Dvaxis=true");
+    if (!enable_vaxis or terminal_unavailable != null) {
+        const disabled = b.addFail(if (enable_vaxis) terminal_unavailable.? else "Vaxis support is disabled; rerun with -Dvaxis=true");
         vaxis_viewer_step.dependOn(&disabled.step);
         run_vaxis_viewer_step.dependOn(&disabled.step);
+    }
+    if (terminal_unavailable) |message| {
+        const disabled = b.addFail(message);
+        cli_example_step.dependOn(&disabled.step);
+        run_cli_example_step.dependOn(&disabled.step);
+    } else if (uucode != null) {
+        const term_tests = b.addTest(.{
+            .name = "markdown-term-tests",
+            .root_module = markdown_term.?,
+        });
+        test_step.dependOn(&b.addRunArtifact(term_tests).step);
+        test_compile_step.dependOn(&term_tests.step);
+
+        const cli_example = b.addExecutable(.{
+            .name = "markdown-cli",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("examples/cli/main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "markdown", .module = markdown },
+                    .{ .name = "markdown-term", .module = markdown_term.? },
+                    .{ .name = "default_document", .module = default_document },
+                },
+            }),
+        });
+        cli_example_step.dependOn(&cli_example.step);
+        const run_cli_example = b.addRunArtifact(cli_example);
+        run_cli_example.addPassthruArgs();
+        run_cli_example_step.dependOn(&run_cli_example.step);
     }
     if (!enable_http) {
         const disabled = b.addFail("http.zig support is disabled; rerun with -Dhttp=true");
@@ -145,11 +217,14 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-    if (enable_vaxis) {
+    if (enable_vaxis and uucode != null) {
         if (b.lazyDependency("vaxis", .{
             .target = target,
             .optimize = optimize,
+            .external_uucode = true,
         })) |vaxis_dep| {
+            const vaxis = vaxis_dep.module("vaxis");
+            vaxis.addImport("uucode", uucode.?);
             const vaxis_viewer = b.addExecutable(.{
                 .name = "markdown-vaxis-viewer",
                 .root_module = b.createModule(.{
@@ -158,8 +233,9 @@ pub fn build(b: *std.Build) void {
                     .optimize = optimize,
                     .imports = &.{
                         .{ .name = "markdown", .module = markdown },
+                        .{ .name = "markdown-term", .module = markdown_term.? },
                         .{ .name = "default_document", .module = default_document },
-                        .{ .name = "vaxis", .module = vaxis_dep.module("vaxis") },
+                        .{ .name = "vaxis", .module = vaxis },
                     },
                 }),
             });
