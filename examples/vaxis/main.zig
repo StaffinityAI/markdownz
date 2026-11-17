@@ -1,301 +1,18 @@
 const std = @import("std");
 const default_document = @import("default_document");
 const markdown = @import("markdown");
+const term = @import("markdown-term");
 const vaxis = @import("vaxis");
 
 pub const panic = vaxis.Panic;
 
 const max_markdown_size = 64 * 1024 * 1024;
 const default_markdown = default_document.source;
+const image_height = 14;
 
 const Event = union(enum) {
     key_press: vaxis.Key,
     winsize: vaxis.Winsize,
-};
-
-const ImageBlock = struct {
-    path: []const u8,
-    image: ?vaxis.Image = null,
-};
-
-const ImageRef = struct {
-    alt_text: []markdown.Node.Section,
-    path: []const u8,
-};
-
-const TableColumn = struct {
-    alignment: markdown.Node.Column.Alignment,
-    header: []const vaxis.Segment,
-    values: []const []const vaxis.Segment,
-};
-
-const TableBlock = struct {
-    columns: []const TableColumn,
-    row_count: usize,
-};
-
-const TableBorderKind = enum { top, middle, bottom };
-
-const LineKind = union(enum) {
-    normal,
-    heading: u8,
-    code,
-    image: ImageBlock,
-    table: TableBlock,
-    rule,
-};
-
-const Line = struct {
-    segments: []const vaxis.Segment,
-    gap_before: u8 = 0,
-    kind: LineKind = .normal,
-};
-
-const Document = struct {
-    lines: std.ArrayList(Line) = .empty,
-
-    fn deinit(self: *Document, allocator: std.mem.Allocator) void {
-        for (self.lines.items) |line| allocator.free(line.segments);
-        self.lines.deinit(allocator);
-    }
-};
-
-const DocumentLayout = struct {
-    width: u16 = 0,
-    starts: std.ArrayList(usize) = .empty,
-    heights: std.ArrayList(usize) = .empty,
-    total_rows: usize = 0,
-
-    fn deinit(self: *DocumentLayout, allocator: std.mem.Allocator) void {
-        self.starts.deinit(allocator);
-        self.heights.deinit(allocator);
-    }
-
-    fn update(self: *DocumentLayout, allocator: std.mem.Allocator, measure: vaxis.Window, lines: []const Line) !void {
-        if (self.width == measure.width and self.starts.items.len == lines.len) return;
-        self.width = measure.width;
-        self.starts.clearRetainingCapacity();
-        self.heights.clearRetainingCapacity();
-        var total: usize = 0;
-        for (lines) |line| {
-            total += line.gap_before;
-            try self.starts.append(allocator, total);
-            const height = lineHeight(measure, line);
-            try self.heights.append(allocator, height);
-            total += height;
-        }
-        self.total_rows = total;
-    }
-};
-
-const Renderer = struct {
-    allocator: std.mem.Allocator,
-    document: *Document,
-
-    fn render(self: *Renderer, nodes: []*markdown.Node, quote_depth: usize) !void {
-        for (nodes) |node| switch (node.*) {
-            .heading => |heading| {
-                var segments: std.ArrayList(vaxis.Segment) = .empty;
-                try self.appendPrefix(&segments, quote_depth, "");
-                try segments.append(self.allocator, .{
-                    .text = headingMarker(heading.level),
-                    .style = headingStyle(heading.level),
-                });
-                try self.appendSections(&segments, heading.text, headingStyle(heading.level), null);
-                try self.addLine(&segments, headingGap(heading.level), .{ .heading = heading.level });
-                try self.render(heading.children.items, quote_depth);
-            },
-            .text => |sections| {
-                if (standaloneImage(sections)) |image| {
-                    var segments: std.ArrayList(vaxis.Segment) = .empty;
-                    try segments.append(self.allocator, .{ .text = "Image: ", .style = .{ .bold = true, .fg = .{ .index = 6 } } });
-                    try self.appendSections(&segments, image.alt_text, .{ .italic = true }, null);
-                    try self.addLine(&segments, 1, .{ .image = .{ .path = image.path } });
-                    continue;
-                }
-
-                var segments: std.ArrayList(vaxis.Segment) = .empty;
-                try self.appendPrefix(&segments, quote_depth, "");
-                try self.appendSections(&segments, sections, .{}, null);
-                try self.addLine(&segments, 0, .normal);
-            },
-            .line_break => try self.addTextLine("", .{}),
-            .horizontal_rule => try self.addSpecialLine(.rule, 1),
-            .code_block => |block| {
-                const label = if (block.language.len == 0) "code" else block.language;
-                var header: std.ArrayList(vaxis.Segment) = .empty;
-                try self.appendPrefix(&header, quote_depth, "");
-                try header.append(self.allocator, .{ .text = "  " });
-                try header.append(self.allocator, .{ .text = label, .style = .{ .bold = true, .fg = .{ .index = 6 } } });
-                applyBackground(header.items, .{ .index = 0 });
-                try self.addLine(&header, 1, .code);
-                for (block.lines.items) |line| {
-                    var segments: std.ArrayList(vaxis.Segment) = .empty;
-                    try self.appendPrefix(&segments, quote_depth, "    ");
-                    try segments.append(self.allocator, .{ .text = line, .style = .{ .fg = .{ .index = 2 } } });
-                    applyBackground(segments.items, .{ .index = 0 });
-                    try self.addLine(&segments, 0, .code);
-                }
-            },
-            .list => |list| try self.renderList(list, 0, quote_depth),
-            .block_quote => |nodes_in_quote| try self.render(nodes_in_quote.items, quote_depth + 1),
-            .table => |columns| try self.renderTable(columns),
-            .footnote => |sections| {
-                var segments: std.ArrayList(vaxis.Segment) = .empty;
-                try self.appendPrefix(&segments, quote_depth, "[^] ");
-                try self.appendSections(&segments, sections, .{ .dim = true }, null);
-                try self.addLine(&segments, 0, .normal);
-            },
-            .alert => try self.addTextLine("[alert]", .{ .bold = true, .fg = .{ .index = 3 } }),
-            .container => try self.addTextLine("[container]", .{ .dim = true }),
-        };
-    }
-
-    fn renderList(self: *Renderer, list: std.ArrayList(*markdown.Node.Element), depth: usize, quote_depth: usize) !void {
-        for (list.items) |element| {
-            var segments: std.ArrayList(vaxis.Segment) = .empty;
-            try self.appendPrefix(&segments, quote_depth, "");
-            const indent = try self.allocator.alloc(u8, depth * 2);
-            @memset(indent, ' ');
-            try segments.append(self.allocator, .{ .text = indent });
-
-            const marker = switch (element.data) {
-                .ordered => |number| try std.fmt.allocPrint(self.allocator, "{d}. ", .{number}),
-                .unordered => "• ",
-                .task => |done| if (done) "[x] " else "[ ] ",
-            };
-            try segments.append(self.allocator, .{ .text = marker, .style = .{ .bold = true, .fg = .{ .index = 6 } } });
-            try self.appendSections(&segments, element.text, .{}, null);
-            try self.addLine(&segments, 0, .normal);
-            try self.renderList(element.children, depth + 1, quote_depth);
-        }
-    }
-
-    fn renderTable(self: *Renderer, columns: []markdown.Node.Column) !void {
-        if (columns.len == 0) return;
-
-        const rendered_columns = try self.allocator.alloc(TableColumn, columns.len);
-        var row_count: usize = 0;
-        for (rendered_columns, columns) |*rendered, column| {
-            const header = try self.renderSections(column.header, .{ .bold = true, .fg = .{ .index = 15 }, .bg = .{ .index = 4 } });
-            const values = try self.allocator.alloc([]const vaxis.Segment, column.values.len);
-            for (values, column.values) |*value, sections| {
-                value.* = try self.renderSections(sections, .{});
-            }
-            rendered.* = .{
-                .alignment = column.alignment,
-                .header = header,
-                .values = values,
-            };
-            row_count = @max(row_count, values.len);
-        }
-
-        try self.document.lines.append(self.allocator, .{
-            .segments = &.{},
-            .gap_before = 1,
-            .kind = .{ .table = .{ .columns = rendered_columns, .row_count = row_count } },
-        });
-    }
-
-    fn renderSections(self: *Renderer, sections: []markdown.Node.Section, style: vaxis.Style) ![]const vaxis.Segment {
-        var segments: std.ArrayList(vaxis.Segment) = .empty;
-        try self.appendSections(&segments, sections, style, null);
-        return segments.toOwnedSlice(self.allocator);
-    }
-
-    fn appendPrefix(self: *Renderer, segments: *std.ArrayList(vaxis.Segment), quote_depth: usize, suffix: []const u8) !void {
-        for (0..quote_depth) |_| {
-            try segments.append(self.allocator, .{ .text = "│ ", .style = .{ .fg = .{ .index = 6 } } });
-        }
-        if (suffix.len > 0) try segments.append(self.allocator, .{ .text = suffix });
-    }
-
-    fn appendSections(
-        self: *Renderer,
-        segments: *std.ArrayList(vaxis.Segment),
-        sections: []markdown.Node.Section,
-        base_style: vaxis.Style,
-        link: ?[]const u8,
-    ) !void {
-        for (sections) |section| switch (section) {
-            .default => |text| try segments.append(self.allocator, segment(text, base_style, link)),
-            .code => |text| {
-                var style = base_style;
-                style.fg = .{ .index = 2 };
-                style.bg = .{ .index = 0 };
-                try segments.append(self.allocator, segment(text, style, link));
-            },
-            .bold => |nested| {
-                var style = base_style;
-                style.bold = true;
-                try self.appendSections(segments, nested, style, link);
-            },
-            .italic => |nested| {
-                var style = base_style;
-                style.italic = true;
-                try self.appendSections(segments, nested, style, link);
-            },
-            .bold_italic => |nested| {
-                var style = base_style;
-                style.bold = true;
-                style.italic = true;
-                try self.appendSections(segments, nested, style, link);
-            },
-            .underline => |nested| {
-                var style = base_style;
-                style.ul_style = .single;
-                try self.appendSections(segments, nested, style, link);
-            },
-            .strike_through => |nested| {
-                var style = base_style;
-                style.strikethrough = true;
-                try self.appendSections(segments, nested, style, link);
-            },
-            .highlight => |nested| {
-                var style = base_style;
-                style.fg = .{ .index = 0 };
-                style.bg = .{ .index = 3 };
-                try self.appendSections(segments, nested, style, link);
-            },
-            .link => |value| {
-                var style = base_style;
-                style.fg = .{ .index = 4 };
-                style.ul_style = .single;
-                try self.appendSections(segments, value.title, style, value.url);
-            },
-            .image => |image| {
-                try segments.append(self.allocator, .{ .text = "[image: ", .style = .{ .dim = true } });
-                try self.appendSections(segments, image.alt_text, .{ .dim = true }, null);
-                try segments.append(self.allocator, .{ .text = "]", .style = .{ .dim = true } });
-            },
-            .emoji_shortcode => |name| {
-                try segments.append(self.allocator, .{ .text = ":" });
-                try segments.append(self.allocator, .{ .text = name, .style = .{ .fg = .{ .index = 5 } } });
-                try segments.append(self.allocator, .{ .text = ":" });
-            },
-            .subscript => |nested| try self.appendSections(segments, nested, base_style, link),
-            .superscript => |nested| try self.appendSections(segments, nested, base_style, link),
-            .typographic => |text| try segments.append(self.allocator, segment(text, base_style, link)),
-        };
-    }
-
-    fn addTextLine(self: *Renderer, text: []const u8, style: vaxis.Style) !void {
-        const segments = try self.allocator.alloc(vaxis.Segment, 1);
-        segments[0] = .{ .text = text, .style = style };
-        try self.document.lines.append(self.allocator, .{ .segments = segments });
-    }
-
-    fn addSpecialLine(self: *Renderer, kind: LineKind, gap_before: u8) !void {
-        try self.document.lines.append(self.allocator, .{ .segments = &.{}, .gap_before = gap_before, .kind = kind });
-    }
-
-    fn addLine(self: *Renderer, segments: *std.ArrayList(vaxis.Segment), gap_before: u8, kind: LineKind) !void {
-        try self.document.lines.append(self.allocator, .{
-            .segments = try segments.toOwnedSlice(self.allocator),
-            .gap_before = gap_before,
-            .kind = kind,
-        });
-    }
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -317,9 +34,9 @@ pub fn main(init: std.process.Init) !void {
 
     var render_arena = std.heap.ArenaAllocator.init(init.gpa);
     defer render_arena.deinit();
-    var document: Document = .{};
-    var renderer: Renderer = .{ .allocator = render_arena.allocator(), .document = &document };
-    try renderer.render(graph, 0);
+    const document = try term.build(render_arena.allocator(), graph);
+    const images = try render_arena.allocator().alloc(?vaxis.Image, document.blocks.len);
+    @memset(images, null);
 
     var tty_buffer: [1024]u8 = undefined;
     var tty: vaxis.Tty = try .init(init.io, &tty_buffer);
@@ -335,20 +52,21 @@ pub fn main(init: std.process.Init) !void {
     try vx.enterAltScreen(tty.writer());
     try vx.queryTerminal(tty.writer(), .fromSeconds(1));
     loadDocumentImages(
-        &document,
+        document,
+        images,
         &vx,
         tty.writer(),
         init.gpa,
         if (args.len == 2) std.fs.path.dirname(args[1]) orelse "." else null,
     ) catch |err| {
-        freeDocumentImages(document.lines.items, vx, tty.writer());
+        freeDocumentImages(images, vx, tty.writer());
         return err;
     };
-    defer freeDocumentImages(document.lines.items, vx, tty.writer());
+    defer freeDocumentImages(images, vx, tty.writer());
 
     const title = if (args.len == 2) std.fs.path.basename(args[1]) else "Markdown concepts";
     var scroll: usize = 0;
-    var layout: DocumentLayout = .{};
+    var layout: term.Layout = .{};
     defer layout.deinit(init.gpa);
     while (true) {
         const event = try loop.nextEvent();
@@ -382,8 +100,12 @@ pub fn main(init: std.process.Init) !void {
         const outer_margin: u16 = if (win.width >= 100) @min((win.width - 84) / 2, 8) else 1;
         const body_width = win.width -| (outer_margin * 2) -| 1;
         const content_height = win.height -| 2;
-        const measure = win.child(.{ .width = body_width, .height = std.math.maxInt(u16) });
-        try layout.update(init.gpa, measure, document.lines.items);
+        const measure = windowMeasure(win);
+        try layout.update(init.gpa, document.blocks, .{
+            .width = body_width,
+            .measure = measure,
+            .image_height = image_height,
+        });
         const total_rows = layout.total_rows;
         const max_scroll = total_rows -| content_height;
         scroll = @min(scroll, max_scroll);
@@ -394,7 +116,7 @@ pub fn main(init: std.process.Init) !void {
             .width = body_width,
             .height = content_height,
         });
-        drawDocument(viewport, document.lines.items, layout, scroll);
+        drawDocument(viewport, document, images, layout, scroll, measure);
         drawScrollbar(win, scroll, total_rows, content_height);
 
         var status_buffer: [512]u8 = undefined;
@@ -413,7 +135,8 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn loadDocumentImages(
-    document: *Document,
+    document: term.Document,
+    images: []?vaxis.Image,
     vx: *vaxis.Vaxis,
     tty: *std.Io.Writer,
     allocator: std.mem.Allocator,
@@ -421,21 +144,21 @@ fn loadDocumentImages(
 ) !void {
     if (!vx.caps.kitty_graphics) return;
 
-    for (document.lines.items) |*line| switch (line.kind) {
-        .image => |*image| {
-            image.image = if (markdown_dir) |dir| blk: {
-                const path = if (std.fs.path.isAbsolute(image.path))
-                    image.path
+    for (document.blocks, images) |block, *image| switch (block.kind) {
+        .image => |image_path| {
+            image.* = if (markdown_dir) |dir| blk: {
+                const path = if (std.fs.path.isAbsolute(image_path))
+                    image_path
                 else
-                    try std.fs.path.join(allocator, &.{ dir, image.path });
-                defer if (path.ptr != image.path.ptr) allocator.free(path);
+                    try std.fs.path.join(allocator, &.{ dir, image_path });
+                defer if (path.ptr != image_path.ptr) allocator.free(path);
                 break :blk vx.loadImage(allocator, tty, .{ .path = path }) catch |err| {
-                    std.log.warn("unable to load image '{s}': {s}", .{ image.path, @errorName(err) });
+                    std.log.warn("unable to load image '{s}': {s}", .{ image_path, @errorName(err) });
                     continue;
                 };
-            } else if (std.mem.eql(u8, image.path, default_document.image_name))
+            } else if (std.mem.eql(u8, image_path, default_document.image_name))
                 vx.loadImage(allocator, tty, .{ .mem = default_document.image }) catch |err| {
-                    std.log.warn("unable to load embedded image '{s}': {s}", .{ image.path, @errorName(err) });
+                    std.log.warn("unable to load embedded image '{s}': {s}", .{ image_path, @errorName(err) });
                     continue;
                 }
             else
@@ -445,536 +168,66 @@ fn loadDocumentImages(
     };
 }
 
-fn freeDocumentImages(lines: []const Line, vx: vaxis.Vaxis, tty: *std.Io.Writer) void {
-    for (lines) |line| switch (line.kind) {
-        .image => |image| if (image.image) |loaded| vx.freeImage(tty, loaded.id),
-        else => {},
-    };
+fn freeDocumentImages(images: []const ?vaxis.Image, vx: vaxis.Vaxis, tty: *std.Io.Writer) void {
+    for (images) |image| if (image) |loaded| vx.freeImage(tty, loaded.id);
 }
 
-fn standaloneImage(sections: []markdown.Node.Section) ?ImageRef {
-    if (sections.len != 1) return null;
-    return switch (sections[0]) {
-        .image => |image| .{ .alt_text = image.alt_text, .path = image.path },
-        else => null,
-    };
-}
-
-fn lineHeight(measure: vaxis.Window, line: Line) usize {
-    return switch (line.kind) {
-        .rule => 1,
-        .normal, .code => measuredLineHeight(measure, line.segments),
-        .image => 14,
-        .table => |table| tableHeight(measure, table),
-        .heading => |level| measuredLineHeight(measure, line.segments) + @as(usize, switch (level) {
-            1 => 2,
-            2 => 1,
-            else => 0,
-        }),
-    };
-}
-
-fn tableHeight(measure: vaxis.Window, table: TableBlock) usize {
-    if (table.columns.len == 0) return 0;
-    if (measure.width < table.columns.len * 4 + 1) return 1;
-    const widths = tableColumnWidths(measure.width, table.columns.len);
-    var height: usize = 2;
-    height += tableRowHeight(measure, table, widths, null);
-    for (0..table.row_count) |row| height += tableRowHeight(measure, table, widths, row) + 1;
-    return height;
-}
-
-fn tableRowHeight(measure: vaxis.Window, table: TableBlock, widths: TableWidths, row: ?usize) usize {
-    var height: usize = 1;
-    for (table.columns, 0..) |column, index| {
-        const segments = if (row) |row_index|
-            if (row_index < column.values.len) column.values[row_index] else &.{}
-        else
-            column.header;
-        const cell_width = widths.width(index) -| 2;
-        const cell_window = measure.child(.{ .width = cell_width, .height = std.math.maxInt(u16) });
-        height = @max(height, measuredLineHeight(cell_window, segments));
-    }
-    return height;
-}
-
-fn measuredLineHeight(measure: vaxis.Window, segments: []const vaxis.Segment) usize {
-    if (segments.len == 0) return 1;
-    var row: usize = 0;
-    var col: usize = 0;
-    var soft_wrapped = false;
-    var in_word = false;
-    for (segments) |text_segment| {
-        var lines: TextLineIterator = .{ .buf = text_segment.text };
-        while (lines.next()) |line| {
-            var tokens: WordTokenizer = .{ .buf = line };
-            while (tokens.next()) |token| switch (token) {
-                .whitespace => |len| {
-                    in_word = false;
-                    if (soft_wrapped) continue;
-                    for (0..len) |_| {
-                        if (col >= measure.width) {
-                            col = 0;
-                            row += 1;
-                            break;
-                        }
-                        col += 1;
-                    }
-                },
-                .word => |word| {
-                    const width = measuredTextWidth(measure, word);
-                    if (!in_word and width + col > measure.width and width <= measure.width) {
-                        row += 1;
-                        col = 0;
-                    }
-                    in_word = true;
-                    var graphemes = vaxis.unicode.graphemeIterator(word);
-                    while (graphemes.next()) |grapheme| {
-                        soft_wrapped = false;
-                        const grapheme_width = measure.gwidth(grapheme.bytes(word));
-                        if (grapheme_width == 0) continue;
-                        if (grapheme_width > measure.width) continue;
-                        if (col != 0 and col + grapheme_width > measure.width) {
-                            row += 1;
-                            col = 0;
-                        }
-                        col += grapheme_width;
-                        if (col >= measure.width) {
-                            row += 1;
-                            col = 0;
-                            soft_wrapped = true;
-                        }
-                    }
-                },
-            };
-            if (lines.has_break) {
-                soft_wrapped = false;
-                in_word = false;
-                row += 1;
-                col = 0;
-            }
-        }
-    }
-    return @max(row + @intFromBool(col > 0), 1);
-}
-
-fn measuredTextWidth(measure: vaxis.Window, text: []const u8) usize {
-    var width: usize = 0;
-    var graphemes = vaxis.unicode.graphemeIterator(text);
-    while (graphemes.next()) |grapheme| width += measure.gwidth(grapheme.bytes(text));
-    return width;
-}
-
-fn drawWrappedSegments(win: vaxis.Window, segments: []const vaxis.Segment, skipped_rows: usize, row_offset: usize, col_offset: usize) void {
-    var row = row_offset;
-    var col = col_offset;
-    var soft_wrapped = false;
-    var in_word = false;
-    for (segments) |text_segment| {
-        var lines: TextLineIterator = .{ .buf = text_segment.text };
-        while (lines.next()) |line| {
-            var tokens: WordTokenizer = .{ .buf = line };
-            while (tokens.next()) |token| switch (token) {
-                .whitespace => |len| {
-                    in_word = false;
-                    if (soft_wrapped) continue;
-                    for (0..len) |_| {
-                        if (col >= win.width) {
-                            col = 0;
-                            row += 1;
-                            break;
-                        }
-                        writeVisibleTextCell(win, row, col, skipped_rows, " ", 1, text_segment);
-                        col += 1;
-                    }
-                },
-                .word => |word| {
-                    const width = measuredTextWidth(win, word);
-                    if (!in_word and width + col > win.width and width <= win.width) {
-                        row += 1;
-                        col = 0;
-                    }
-                    in_word = true;
-                    var graphemes = vaxis.unicode.graphemeIterator(word);
-                    while (graphemes.next()) |grapheme| {
-                        soft_wrapped = false;
-                        const bytes = grapheme.bytes(word);
-                        const grapheme_width = win.gwidth(bytes);
-                        if (grapheme_width == 0) continue;
-                        if (grapheme_width > win.width) continue;
-                        if (col != 0 and col + grapheme_width > win.width) {
-                            row += 1;
-                            col = 0;
-                        }
-                        writeVisibleTextCell(win, row, col, skipped_rows, bytes, @intCast(grapheme_width), text_segment);
-                        col += grapheme_width;
-                        if (col >= win.width) {
-                            row += 1;
-                            col = 0;
-                            soft_wrapped = true;
-                        }
-                    }
-                },
-            };
-            if (lines.has_break) {
-                soft_wrapped = false;
-                in_word = false;
-                row += 1;
-                col = 0;
-            }
-        }
-    }
-}
-
-fn writeVisibleTextCell(
-    win: vaxis.Window,
-    row: usize,
-    col: usize,
-    skipped_rows: usize,
-    grapheme: []const u8,
-    width: u8,
-    text_segment: vaxis.Segment,
+fn drawDocument(
+    viewport: vaxis.Window,
+    document: term.Document,
+    images: []const ?vaxis.Image,
+    layout: term.Layout,
+    scroll: usize,
+    measure: term.Measure,
 ) void {
-    if (row < skipped_rows or row >= skipped_rows + win.height or col >= win.width) return;
-    win.writeCell(@intCast(col), @intCast(row - skipped_rows), .{
-        .char = .{ .grapheme = grapheme, .width = width },
-        .style = text_segment.style,
-        .link = text_segment.link,
-        .wrapped = col + width >= win.width,
-    });
-}
-
-const TextLineIterator = struct {
-    buf: []const u8,
-    index: usize = 0,
-    has_break: bool = true,
-
-    fn next(self: *TextLineIterator) ?[]const u8 {
-        if (self.index >= self.buf.len) return null;
-        const start = self.index;
-        const end = std.mem.indexOfAnyPos(u8, self.buf, self.index, "\r\n") orelse {
-            self.has_break = false;
-            self.index = self.buf.len;
-            return self.buf[start..];
-        };
-        self.index = end;
-        if (self.index < self.buf.len and self.buf[self.index] == '\r') self.index += 1;
-        if (self.index < self.buf.len and self.buf[self.index] == '\n') self.index += 1;
-        return self.buf[start..end];
-    }
-};
-
-const WordTokenizer = struct {
-    buf: []const u8,
-    index: usize = 0,
-
-    const Token = union(enum) {
-        whitespace: usize,
-        word: []const u8,
-    };
-
-    fn next(self: *WordTokenizer) ?Token {
-        if (self.index >= self.buf.len) return null;
-        if (self.buf[self.index] == ' ' or self.buf[self.index] == '\t') {
-            var len: usize = 0;
-            while (self.index < self.buf.len) : (self.index += 1) switch (self.buf[self.index]) {
-                ' ' => len += 1,
-                '\t' => len += 8,
-                else => break,
-            };
-            return .{ .whitespace = len };
-        }
-        const start = self.index;
-        while (self.index < self.buf.len and self.buf[self.index] != ' ' and self.buf[self.index] != '\t') : (self.index += 1) {}
-        return .{ .word = self.buf[start..self.index] };
-    }
-};
-
-fn drawDocument(viewport: vaxis.Window, lines: []const Line, layout: DocumentLayout, scroll: usize) void {
-    var index = firstVisibleLine(layout, scroll);
-    while (index < lines.len) : (index += 1) {
-        const line = lines[index];
-        const document_row = layout.starts.items[index];
+    var index = layout.firstVisible(scroll);
+    while (index < document.blocks.len) : (index += 1) {
+        const block = document.blocks[index];
+        const block_row = layout.starts.items[index];
         const height = layout.heights.items[index];
-        const line_end = document_row + height;
-        if (line_end > scroll and document_row < scroll + viewport.height) {
-            const visible_start = scroll -| document_row;
-            const screen_row: u16 = @intCast(document_row -| scroll);
-            const visible_height: u16 = @intCast(@min(height - visible_start, viewport.height - screen_row));
+        const block_end = block_row + height;
+        if (block_end > scroll and block_row < scroll + viewport.height) {
+            const visible_start = scroll -| block_row;
+            const screen_row: u16 = @intCast(block_row -| scroll);
             const visible_window = viewport.child(.{
-                .y_off = @intCast(screen_row),
-                .height = visible_height,
+                .y_off = screen_row,
+                .height = @intCast(@min(height - visible_start, viewport.height - screen_row)),
             });
-            if (line.kind == .table) {
-                drawTable(visible_window, line.kind.table, visible_start);
-                if (line_end >= scroll + viewport.height) break;
-                continue;
-            }
-
-            switch (line.kind) {
-                .rule => drawRule(viewport, @intCast(document_row - scroll)),
-                .heading => |level| {
-                    drawHeadingBackground(visible_window, level);
-                    drawWrappedSegments(visible_window, line.segments, visible_start, if (level == 1) 1 else 0, 0);
-                    if (level == 2) drawHeadingDivider(visible_window, height, visible_start);
-                },
-                .code => {
-                    visible_window.fill(.{ .char = .{ .grapheme = " " }, .style = .{ .bg = .{ .index = 0 } } });
-                    drawWrappedSegments(visible_window, line.segments, visible_start, 0, 0);
-                },
-                .image => |image| {
-                    if (visible_start == 0 and visible_height == height) {
-                        if (image.image) |loaded| {
-                            loaded.draw(visible_window, .{ .scale = .contain }) catch drawImageFallback(visible_window, line.segments);
-                        } else {
-                            drawImageFallback(visible_window, line.segments);
-                        }
+            const region = windowRegion(&visible_window);
+            switch (block.kind) {
+                .image => if (visible_start == 0 and visible_window.height == height) {
+                    if (images[index]) |loaded| {
+                        loaded.draw(visible_window, .{ .scale = .contain }) catch drawImageFallback(region, block.spans, measure);
                     } else {
-                        drawClippedImagePlaceholder(visible_window, line.segments, visible_start, image.image != null);
+                        drawImageFallback(region, block.spans, measure);
                     }
+                } else {
+                    drawClippedImagePlaceholder(region, block.spans, visible_start, images[index] != null, measure);
                 },
-                .table => unreachable,
-                .normal => drawWrappedSegments(visible_window, line.segments, visible_start, 0, 0),
+                else => term.paintBlock(region, block, height, visible_start, measure),
             }
         }
-        if (line_end >= scroll + viewport.height) break;
+        if (block_end >= scroll + viewport.height) break;
     }
 }
 
-fn firstVisibleLine(layout: DocumentLayout, scroll: usize) usize {
-    var low: usize = 0;
-    var high = layout.starts.items.len;
-    while (low < high) {
-        const mid = low + (high - low) / 2;
-        if (layout.starts.items[mid] + layout.heights.items[mid] <= scroll) {
-            low = mid + 1;
-        } else {
-            high = mid;
-        }
-    }
-    return low;
-}
-
-const TableWidths = struct {
-    total: u16,
-    columns: usize,
-    base: u16,
-    remainder: u16,
-
-    fn width(self: TableWidths, index: usize) u16 {
-        return self.base + @intFromBool(index < self.remainder);
-    }
-
-    fn offset(self: TableWidths, index: usize) u16 {
-        return @intCast(index * self.base + @min(index, self.remainder));
-    }
-};
-
-fn tableColumnWidths(total_width: u16, columns: usize) TableWidths {
-    const inner_width = total_width -| @as(u16, @intCast(columns + 1));
-    return .{
-        .total = total_width,
-        .columns = columns,
-        .base = @max(inner_width / @as(u16, @intCast(columns)), 3),
-        .remainder = inner_width % @as(u16, @intCast(columns)),
-    };
-}
-
-fn drawTable(win: vaxis.Window, table: TableBlock, visible_start: usize) void {
-    if (table.columns.len == 0 or win.width < table.columns.len * 4 + 1) {
-        _ = win.printSegment(.{ .text = "[table too wide for terminal]", .style = .{ .dim = true } }, .{ .wrap = .none });
-        return;
-    }
-
-    const widths = tableColumnWidths(win.width, table.columns.len);
-    var document_row: usize = 0;
-    drawVisibleTableBorder(win, document_row, visible_start, widths, .top);
-    document_row += 1;
-    const header_height = tableRowHeight(win, table, widths, null);
-    drawVisibleTableRow(win, document_row, visible_start, table, widths, null, true, header_height);
-    document_row += header_height;
-    drawVisibleTableBorder(win, document_row, visible_start, widths, if (table.row_count == 0) .bottom else .middle);
-    document_row += 1;
-    for (0..table.row_count) |row_index| {
-        const height = tableRowHeight(win, table, widths, row_index);
-        drawVisibleTableRow(win, document_row, visible_start, table, widths, row_index, false, height);
-        document_row += height;
-        drawVisibleTableBorder(win, document_row, visible_start, widths, if (row_index + 1 == table.row_count) .bottom else .middle);
-        document_row += 1;
-        if (document_row >= visible_start + win.height) break;
-    }
-}
-
-fn drawVisibleTableBorder(
-    win: vaxis.Window,
-    document_row: usize,
-    visible_start: usize,
-    widths: TableWidths,
-    kind: TableBorderKind,
-) void {
-    if (document_row < visible_start or document_row >= visible_start + win.height) return;
-    drawTableBorder(win, @intCast(document_row - visible_start), widths, kind);
-}
-
-fn drawVisibleTableRow(
-    win: vaxis.Window,
-    document_row: usize,
-    visible_start: usize,
-    table: TableBlock,
-    widths: TableWidths,
-    row_index: ?usize,
-    header: bool,
-    height: usize,
-) void {
-    const row_end = document_row + height;
-    if (row_end <= visible_start or document_row >= visible_start + win.height) return;
-    const skipped = visible_start -| document_row;
-    const screen_row = document_row -| visible_start;
-    const row_window = win.child(.{
-        .y_off = @intCast(screen_row),
-        .height = @intCast(@min(height - skipped, win.height - screen_row)),
-    });
-    drawTableRow(row_window, table, widths, row_index, header, skipped);
-}
-
-fn drawTableRow(
-    win: vaxis.Window,
-    table: TableBlock,
-    widths: TableWidths,
-    row_index: ?usize,
-    header: bool,
-    skipped: usize,
-) void {
-    const fill_style: vaxis.Style = if (header)
-        .{ .fg = .{ .index = 15 }, .bg = .{ .index = 4 }, .bold = true }
-    else if (row_index.? % 2 == 1)
-        .{ .bg = .{ .index = 0 } }
-    else
-        .{};
-
-    for (0..win.height) |line| {
-        win.writeCell(0, @intCast(line), tableBorderCell("│"));
-        for (table.columns, 0..) |_, index| {
-            const cell_x = widths.offset(index) + @as(u16, @intCast(index + 1));
-            const cell_width = widths.width(index);
-            win.writeCell(cell_x + cell_width, @intCast(line), tableBorderCell("│"));
-        }
-    }
-
-    for (table.columns, 0..) |column, index| {
-        const cell_x = widths.offset(index) + @as(u16, @intCast(index + 1));
-        const cell_width = widths.width(index);
-        const cell = win.child(.{
-            .x_off = @intCast(cell_x),
-            .width = cell_width,
-            .height = win.height,
-        });
-        cell.fill(.{ .char = .{ .grapheme = " " }, .style = fill_style });
-
-        const segments = if (row_index) |value_index|
-            if (value_index < column.values.len) column.values[value_index] else &.{}
-        else
-            column.header;
-        const content_width = cell_width -| 2;
-        const content = cell.child(.{
-            .x_off = 1,
-            .width = content_width,
-            .height = win.height,
-        });
-        const text_height = measuredLineHeight(content, segments);
-        const col_offset = tableTextOffset(content, segments, text_height, column.alignment);
-        drawWrappedSegments(content, segments, skipped, 0, col_offset);
-    }
-}
-
-fn tableTextOffset(
-    win: vaxis.Window,
-    segments: []const vaxis.Segment,
-    text_height: usize,
-    alignment: markdown.Node.Column.Alignment,
-) u16 {
-    if (text_height != 1 or alignment == .left) return 0;
-    const result = win.print(segments, .{ .wrap = .none, .commit = false });
-    const remaining = win.width -| result.col;
-    return switch (alignment) {
-        .left => 0,
-        .center => remaining / 2,
-        .right => remaining,
-    };
-}
-
-fn drawTableBorder(win: vaxis.Window, row: u16, widths: TableWidths, kind: TableBorderKind) void {
-    if (row >= win.height) return;
-    const left: []const u8, const join: []const u8, const right: []const u8 = switch (kind) {
-        .top => .{ "┌", "┬", "┐" },
-        .middle => .{ "├", "┼", "┤" },
-        .bottom => .{ "└", "┴", "┘" },
-    };
-    win.writeCell(0, row, tableBorderCell(left));
-    for (0..widths.columns) |index| {
-        const start = widths.offset(index) + @as(u16, @intCast(index + 1));
-        for (0..widths.width(index)) |offset| {
-            win.writeCell(start + @as(u16, @intCast(offset)), row, tableBorderCell("─"));
-        }
-        win.writeCell(start + widths.width(index), row, tableBorderCell(if (index + 1 == widths.columns) right else join));
-    }
-}
-
-fn tableBorderCell(grapheme: []const u8) vaxis.Cell {
-    return .{
-        .char = .{ .grapheme = grapheme },
-        .style = .{ .fg = .{ .index = 8 } },
-    };
-}
-
-fn drawRule(viewport: vaxis.Window, row: u16) void {
-    if (row >= viewport.height) return;
-    var col: u16 = 0;
-    while (col < viewport.width) : (col += 1) {
-        viewport.writeCell(col, row, .{
-            .char = .{ .grapheme = "─" },
-            .style = .{ .fg = .{ .index = 8 } },
-        });
-    }
-}
-
-fn drawImageFallback(win: vaxis.Window, segments: []const vaxis.Segment) void {
-    win.fill(.{ .char = .{ .grapheme = " " }, .style = .{ .bg = .{ .index = 0 } } });
-    _ = win.print(segments, .{ .row_offset = 1, .col_offset = 2, .wrap = .word });
-    _ = win.printSegment(.{
+fn drawImageFallback(region: term.Region, spans: []const term.Span, measure: term.Measure) void {
+    region.fill(.{ .style = .{ .bg = .{ .index = 0 } } });
+    const text = region.child(.{ .x_off = 2 });
+    term.paintSpans(text, spans, 0, 1, 0, measure);
+    term.paintSpans(text, &.{.{
         .text = "Kitty graphics support is unavailable in this terminal.",
         .style = .{ .dim = true },
-    }, .{ .row_offset = 3, .col_offset = 2, .wrap = .word });
+    }}, 0, 3, 0, measure);
 }
 
-fn drawClippedImagePlaceholder(win: vaxis.Window, segments: []const vaxis.Segment, skipped_rows: usize, loaded: bool) void {
-    win.fill(.{ .char = .{ .grapheme = " " }, .style = .{ .bg = .{ .index = 0 } } });
-    drawWrappedSegments(win, segments, skipped_rows, 1, 0);
-    drawWrappedSegments(win, &.{.{
+fn drawClippedImagePlaceholder(region: term.Region, spans: []const term.Span, skipped_rows: usize, loaded: bool, measure: term.Measure) void {
+    region.fill(.{ .style = .{ .bg = .{ .index = 0 } } });
+    term.paintSpans(region, spans, skipped_rows, 1, 0, measure);
+    term.paintSpans(region, &.{.{
         .text = if (loaded) "Image preview is shown when the full image block is visible." else "Image preview is unavailable.",
         .style = .{ .dim = true },
-    }}, skipped_rows, 3, 0);
-}
-
-fn drawHeadingBackground(win: vaxis.Window, level: u8) void {
-    if (level > 2) return;
-    const style: vaxis.Style = if (level == 1)
-        .{ .fg = .{ .index = 15 }, .bg = .{ .index = 5 }, .bold = true }
-    else
-        .{ .fg = .{ .index = 15 }, .bg = .{ .index = 4 }, .bold = true };
-    win.fill(.{ .char = .{ .grapheme = " " }, .style = style });
-}
-
-fn drawHeadingDivider(win: vaxis.Window, height: usize, skipped_rows: usize) void {
-    if (height == 0 or height - 1 < skipped_rows or height - 1 >= skipped_rows + win.height) return;
-    const row: u16 = @intCast(height - 1 - skipped_rows);
-    var col: u16 = 0;
-    while (col < win.width) : (col += 1) {
-        win.writeCell(col, row, .{
-            .char = .{ .grapheme = "─" },
-            .style = .{ .fg = .{ .index = 6 }, .bg = .{ .index = 4 } },
-        });
-    }
+    }}, skipped_rows, 3, 0, measure);
 }
 
 fn drawScrollbar(win: vaxis.Window, scroll: usize, total_rows: usize, viewport_height: u16) void {
@@ -1006,135 +259,73 @@ fn drawBar(win: vaxis.Window, text: []const u8, position: enum { top, bottom }) 
     });
 }
 
-fn headingStyle(level: u8) vaxis.Style {
-    return switch (level) {
-        1 => .{ .bold = true, .fg = .{ .index = 15 }, .bg = .{ .index = 5 } },
-        2 => .{ .bold = true, .fg = .{ .index = 15 }, .bg = .{ .index = 4 } },
-        3 => .{ .bold = true, .ul_style = .single, .fg = .{ .index = 6 } },
-        4 => .{ .bold = true, .fg = .{ .index = 3 } },
-        5 => .{ .bold = true, .dim = true, .fg = .{ .index = 6 } },
-        else => .{ .italic = true, .dim = true },
-    };
+/// Measures with the width method vaxis detected for the terminal, so wrapping
+/// matches what vaxis draws.
+fn windowMeasure(win: vaxis.Window) term.Measure {
+    return .{ .context = &win.screen.width_method, .widthFn = measureWidth };
 }
 
-fn headingMarker(level: u8) []const u8 {
-    return switch (level) {
-        1 => "  ◆  ",
-        2 => "  ◇  ",
-        3 => "▸ ",
-        4 => "› ",
-        5 => "· ",
-        else => "  ",
-    };
+fn measureWidth(context: ?*const anyopaque, grapheme: []const u8) u16 {
+    const method: *const vaxis.gwidth.Method = @ptrCast(@alignCast(context.?));
+    return vaxis.gwidth.gwidth(grapheme, method.*);
 }
 
-fn headingGap(level: u8) u8 {
-    return switch (level) {
-        1, 2 => 2,
-        3, 4 => 1,
-        else => 0,
-    };
-}
-
-fn segment(text: []const u8, style: vaxis.Style, link: ?[]const u8) vaxis.Segment {
+/// `win` must stay alive while the region is used.
+fn windowRegion(win: *const vaxis.Window) term.Region {
     return .{
-        .text = text,
-        .style = style,
-        .link = if (link) |uri| .{ .uri = uri } else .{},
+        .surface = .{ .context = @constCast(win), .writeCellFn = writeWindowCell },
+        .width = win.width,
+        .height = win.height,
     };
 }
 
-test "line measurement exceeds u16 row limits" {
-    var screen = try vaxis.Screen.init(std.testing.allocator, .{
-        .rows = 1,
-        .cols = 1,
-        .x_pixel = 1,
-        .y_pixel = 1,
+fn writeWindowCell(context: *anyopaque, col: u16, row: u16, cell: term.Cell) void {
+    const win: *const vaxis.Window = @ptrCast(@alignCast(context));
+    win.writeCell(col, row, .{
+        .char = .{ .grapheme = cell.grapheme, .width = cell.width },
+        .style = vaxisStyle(cell.style),
+        .link = if (cell.link) |uri| .{ .uri = uri } else .{},
+        .wrapped = cell.wrapped,
     });
-    defer screen.deinit(std.testing.allocator);
-    screen.width_method = .unicode;
-    var vx: vaxis.Vaxis = undefined;
-    vx.screen = screen;
-    const text = try std.testing.allocator.alloc(u8, 70_000);
-    defer std.testing.allocator.free(text);
-    @memset(text, 'a');
-    try std.testing.expect(measuredLineHeight(vx.window(), &.{.{ .text = text }}) > std.math.maxInt(u16));
 }
 
-test "wrapping handles wide zero-width and styled newline segments" {
+fn vaxisStyle(style: term.Style) vaxis.Style {
+    return .{
+        .fg = vaxisColor(style.fg),
+        .bg = vaxisColor(style.bg),
+        .ul_style = if (style.underline) .single else .off,
+        .bold = style.bold,
+        .dim = style.dim,
+        .italic = style.italic,
+        .reverse = style.reverse,
+        .strikethrough = style.strikethrough,
+    };
+}
+
+fn vaxisColor(color: term.Color) vaxis.Color {
+    return switch (color) {
+        .default => .default,
+        .index => |index| .{ .index = index },
+        .rgb => |rgb| .{ .rgb = rgb },
+    };
+}
+
+test "window region writes styled cells through vaxis" {
     var screen = try vaxis.Screen.init(std.testing.allocator, .{
-        .rows = 4,
-        .cols = 3,
-        .x_pixel = 3,
-        .y_pixel = 4,
+        .rows = 2,
+        .cols = 4,
+        .x_pixel = 4,
+        .y_pixel = 2,
     });
     defer screen.deinit(std.testing.allocator);
     screen.width_method = .unicode;
     var vx: vaxis.Vaxis = undefined;
     vx.screen = screen;
     const win = vx.window();
-    const wide = &[_]vaxis.Segment{.{ .text = "ab😀" }};
-    try std.testing.expectEqual(@as(usize, 2), measuredLineHeight(win, wide));
-    drawWrappedSegments(win, wide, 0, 0, 0);
+    const region = windowRegion(&win);
+    term.paintSpans(region, &.{.{ .text = "ab😀", .style = .{ .bold = true }, .link = "https://example.com" }}, 0, 0, 0, windowMeasure(win));
     try std.testing.expectEqualStrings("a", screen.buf[0].char.grapheme);
-    try std.testing.expectEqualStrings("😀", screen.buf[3].char.grapheme);
-
-    const styled = &[_]vaxis.Segment{
-        .{ .text = "a\nb", .style = .{ .bold = true } },
-        .{ .text = "c", .style = .{ .italic = true } },
-    };
-    try std.testing.expectEqual(@as(usize, 2), measuredLineHeight(win, styled));
-
-    const zero_width = &[_]vaxis.Segment{.{ .text = "a\u{200b}b" }};
-    try std.testing.expectEqual(@as(usize, 1), measuredLineHeight(win, zero_width));
-}
-
-test "extreme table cells draw visible slices" {
-    var screen = try vaxis.Screen.init(std.testing.allocator, .{
-        .rows = 3,
-        .cols = 5,
-        .x_pixel = 5,
-        .y_pixel = 3,
-    });
-    defer screen.deinit(std.testing.allocator);
-    var vx: vaxis.Vaxis = undefined;
-    vx.screen = screen;
-
-    const text = try std.testing.allocator.alloc(u8, 70_000);
-    defer std.testing.allocator.free(text);
-    @memset(text, 'a');
-    const values = [_][]const vaxis.Segment{&.{.{ .text = text }}};
-    const columns = [_]TableColumn{.{
-        .alignment = .left,
-        .header = &.{.{ .text = "H" }},
-        .values = &values,
-    }};
-    const table: TableBlock = .{ .columns = &columns, .row_count = 1 };
-    drawVisibleTableRow(vx.window(), 0, 65_536, table, tableColumnWidths(5, 1), 0, false, 70_000);
-    try std.testing.expectEqualStrings("a", screen.buf[2].char.grapheme);
-}
-
-test "document layout caches heights and locates visible lines" {
-    var screen = try vaxis.Screen.init(std.testing.allocator, .{
-        .rows = 4,
-        .cols = 10,
-        .x_pixel = 10,
-        .y_pixel = 4,
-    });
-    defer screen.deinit(std.testing.allocator);
-    var vx: vaxis.Vaxis = undefined;
-    vx.screen = screen;
-    const lines = [_]Line{
-        .{ .segments = &.{.{ .text = "first" }} },
-        .{ .segments = &.{.{ .text = "second" }}, .gap_before = 2 },
-    };
-    var layout: DocumentLayout = .{};
-    defer layout.deinit(std.testing.allocator);
-    try layout.update(std.testing.allocator, vx.window(), &lines);
-    try std.testing.expectEqualSlices(usize, &.{ 0, 3 }, layout.starts.items);
-    try std.testing.expectEqual(@as(usize, 1), firstVisibleLine(layout, 2));
-}
-
-fn applyBackground(segments: []vaxis.Segment, background: vaxis.Color) void {
-    for (segments) |*item| item.style.bg = background;
+    try std.testing.expect(screen.buf[0].style.bold);
+    try std.testing.expectEqualStrings("https://example.com", screen.buf[0].link.uri);
+    try std.testing.expectEqualStrings("😀", screen.buf[2].char.grapheme);
 }
