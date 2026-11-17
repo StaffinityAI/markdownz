@@ -30,6 +30,29 @@ const imports: []const std.Build.Module.Import = &.{
 
 Import only `markdown` if HTML rendering is not needed. The separate renderer module adds no code to parser-only consumers.
 
+`markdown-term` depends on [uucode](https://github.com/jacobsandlund/uucode), a lazy dependency that is fetched only when the bundled copy is used. To keep uucode out of a parser-only build entirely, disable the terminal module:
+
+```zig
+const markdown_dep = b.dependency("markdown", .{
+    .target = target,
+    .optimize = optimize,
+    .terminal = false,
+});
+```
+
+To share a uucode module you already have, for example the one given to libvaxis, pass `.external_uucode = true` and add the import yourself:
+
+```zig
+const markdown_dep = b.dependency("markdown", .{
+    .target = target,
+    .optimize = optimize,
+    .external_uucode = true,
+});
+markdown_dep.module("markdown-term").addImport("uucode", uucode_module);
+```
+
+The external module must include the `east_asian_width`, `grapheme_break`, `general_category`, and `is_emoji_presentation` fields. These are the fields libvaxis requires as well.
+
 ## Parsing
 
 ```zig
@@ -91,7 +114,7 @@ TUIs can use the steps behind `render` directly:
 - `term.paintBlock(region, block, height, skipped_rows, measure)` draws the visible rows of a block onto a `Region` of any `Surface`, which receives cells through one callback.
 - `term.Measure` returns grapheme widths. The default uses Unicode properties from uucode. Pass the TUI library's width function so wrapping matches what it draws.
 
-The Vaxis example shows a Surface and Measure for libvaxis. It builds libvaxis with `external_uucode` so both use one uucode module.
+The Vaxis example shows a Surface and Measure for libvaxis. It builds libvaxis with its own `external_uucode` option so both use one uucode module.
 
 ## Supported Syntax
 

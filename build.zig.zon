@@ -8,6 +8,7 @@
             // Keep in sync with the uucode commit libvaxis pins.
             .url = "git+https://github.com/jacobsandlund/uucode#1fb73433bba5d93366c57f23ff2e9d7939746500",
             .hash = "uucode-0.2.0-ZZjBPm6FVgBcY-79AHV8ckQj86z0JwOyVyj89VeZrEiv",
+            .lazy = true,
         },
         .dvui = .{
             .url = "git+https://github.com/david-vanderson/dvui#23873e6c71a6bbcb23e22d7338e0302d1133d3af",
