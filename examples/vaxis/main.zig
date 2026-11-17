@@ -3,7 +3,7 @@ const default_document = @import("default_document");
 const markdown = @import("markdown");
 const vaxis = @import("vaxis");
 
-pub const panic = vaxis.Panic.call;
+pub const panic = vaxis.Panic;
 
 const max_markdown_size = 64 * 1024 * 1024;
 const default_markdown = default_document.source;

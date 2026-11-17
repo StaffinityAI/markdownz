@@ -1,6 +1,6 @@
 # markdownz
 
-`markdownz` is a Markdown parser for Zig 0.16.0+. It provides:
+`markdownz` is a Markdown parser for Zig 0.17.0+. It provides:
 
 - `markdown`: dependency-free parser and AST
 - `markdown-html`: optional HTML renderer

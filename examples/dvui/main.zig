@@ -39,7 +39,7 @@ pub fn main(init: std.process.Init) !void {
             .limited(max_markdown_size),
         );
         markdown_dir = std.fs.path.dirname(args[1]) orelse ".";
-        break :title try image_arena.dupeZ(u8, std.fs.path.basename(args[1]));
+        break :title try image_arena.dupeSentinel(u8, std.fs.path.basename(args[1]), 0);
     } else title: {
         markdown_source = default_markdown;
         using_default_document = true;
@@ -56,19 +56,22 @@ pub fn main(init: std.process.Init) !void {
     var backend = try SDLBackend.initWindow(.{
         .io = init.io,
         .environ_map = init.environ_map,
-        .allocator = init.gpa,
         .size = .{ .w = 960, .h = 720 },
         .min_size = .{ .w = 400, .h = 300 },
         .vsync = true,
         .title = window_title,
+        .app = "markdown-viewer",
+        .org = "com.staffinity.markdownz",
     });
     defer backend.deinit();
 
+    var window_open = true;
     var win = try dvui.Window.init(@src(), init.gpa, backend.backend(), .{
         .theme = switch (backend.preferredColorScheme() orelse .light) {
             .light => dvui.Theme.builtin.adwaita_light,
             .dark => dvui.Theme.builtin.adwaita_dark,
         },
+        .open_flag = &window_open,
     });
     defer win.deinit();
 
@@ -76,13 +79,10 @@ pub fn main(init: std.process.Init) !void {
     defer widget_arena.deinit();
 
     var interrupted = false;
-    while (true) {
+    while (window_open) {
         const nstime = win.beginWait(interrupted);
         try win.begin(nstime);
         try backend.addAllEvents(&win);
-
-        _ = SDLBackend.c.SDL_SetRenderDrawColor(backend.renderer, 0, 0, 0, 0);
-        _ = SDLBackend.c.SDL_RenderClear(backend.renderer);
 
         {
             var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both });
@@ -93,18 +93,8 @@ pub fn main(init: std.process.Init) !void {
             });
         }
 
-        var keep_running = true;
-        for (dvui.events()) |*event| {
-            if (event.evt == .window and event.evt.window.action == .close) keep_running = false;
-            if (event.evt == .app and event.evt.app.action == .quit) keep_running = false;
-        }
-
+        // `win.end` also updates the cursor and presents the frame.
         const end_micros = try win.end(.{});
-        try backend.setCursor(win.cursorRequested());
-        try backend.textInputRect(win.textInputRequested());
-        try backend.renderPresent();
-
-        if (!keep_running) break;
         interrupted = try backend.waitEventTimeout(win.waitTime(end_micros));
     }
 }
