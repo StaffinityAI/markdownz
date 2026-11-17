@@ -107,10 +107,55 @@ test "unclosed links and images are text" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    for ([_][]const u8{ "[a", "x [WIP", "![a", "[a](b", "[\xa4" }) |source| {
+    for ([_][]const u8{ "[a", "x [WIP", "![a", "[a](b", "[a]", "[a] (b)", "[\xa4" }) |source| {
         const nodes = try parse(arena.allocator(), source, .{});
         try std.testing.expectEqual(@as(usize, 1), nodes.len);
-        try std.testing.expect(nodes[0].* == .text);
+        try expectTextContent(nodes[0], source);
+    }
+
+    const mixed = try parse(arena.allocator(), "[a](b) [c", .{});
+    try std.testing.expectEqual(@as(usize, 2), mixed[0].text.len);
+    try std.testing.expectEqualStrings("b", mixed[0].text[0].link.url);
+    try expectTextContentSections(mixed[0].text[1..], " [c");
+}
+
+test "unclosed emphasis and emoji shortcodes are text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    for ([_][]const u8{ "*abc", "x _y", ":abc", "::", "***x**" }) |source| {
+        const nodes = try parse(arena.allocator(), source, .{});
+        try std.testing.expectEqual(@as(usize, 1), nodes.len);
+        try expectTextContent(nodes[0], source);
+    }
+}
+
+test "link text and urls may contain balanced brackets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const nodes = try parse(arena.allocator(), "[see [1] here](https://en.wikipedia.org/wiki/Zig_(language))", .{});
+    try std.testing.expectEqual(@as(usize, 1), nodes[0].text.len);
+    const link = nodes[0].text[0].link;
+    try std.testing.expectEqualStrings("https://en.wikipedia.org/wiki/Zig_(language)", link.url);
+    try expectTextContentSections(link.title, "see [1] here");
+}
+
+test "out of memory while parsing links is reported" {
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var failing: FailOnceAllocator = .{ .parent = arena.allocator(), .fail_index = fail_index };
+
+        const result = parse(failing.allocator(), "x [a](b) ![c](d) y", .{});
+        if (!failing.failed) {
+            const nodes = try result;
+            try std.testing.expect(nodes[0].text[1] == .link);
+            try std.testing.expect(nodes[0].text[3] == .image);
+            break;
+        }
+        try std.testing.expectError(error.OutOfMemory, result);
     }
 }
 
@@ -680,6 +725,39 @@ test "other unimplemented block concepts remain available as text" {
     try expectTextContent(nodes[1], "<em>html</em>");
 }
 
+/// Fails only the allocation at `fail_index`. `std.testing.FailingAllocator`
+/// keeps failing after it, which hides a swallowed `error.OutOfMemory`.
+const FailOnceAllocator = struct {
+    parent: std.mem.Allocator,
+    fail_index: usize,
+    index: usize = 0,
+    failed: bool = false,
+
+    fn allocator(self: *FailOnceAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = std.mem.Allocator.noResize,
+            .remap = std.mem.Allocator.noRemap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *FailOnceAllocator = @ptrCast(@alignCast(ctx));
+        defer self.index += 1;
+        if (self.index == self.fail_index) {
+            self.failed = true;
+            return null;
+        }
+        return self.parent.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *FailOnceAllocator = @ptrCast(@alignCast(ctx));
+        self.parent.rawFree(memory, alignment, ret_addr);
+    }
+};
+
 fn expectDefaultText(node: *Node, expected: []const u8) !void {
     try std.testing.expect(node.* == .text);
     try expectDefaultSection(node.text, expected);
@@ -1125,28 +1203,16 @@ const Context = struct {
         try ctx.appendNode(arena, node);
     }
 
-    /// The bytes up to `delimiter`, leaving the delimiter unread. Unlike
-    /// `takeDelimiterExclusive`, fails when the line has no `delimiter`, so
-    /// callers can toss it.
-    fn takeUntil(reader: *std.Io.Reader, delimiter: u8) std.Io.Reader.DelimiterError![]u8 {
-        const inclusive = try reader.peekDelimiterInclusive(delimiter);
-        reader.toss(inclusive.len - 1);
-        return inclusive[0 .. inclusive.len - 1];
-    }
-
     fn makeDefaultSection(reader: *Reader) Node.Section {
         return .{ .default = reader.io_reader.buffer[reader.start..reader.io_reader.seek] };
     }
 
-    const ParseLinkSectionError = error{ InvalidMarkdownFile, OutOfMemory } || std.Io.Reader.DelimiterError;
+    const ParseLinkSectionError = error{ InvalidMarkdownFile, OutOfMemory } || std.Io.Reader.Error;
 
     fn parseLinkSection(arena: std.mem.Allocator, reader: *Reader, as: enum(u1) { image, link }, options: Options) ParseLinkSectionError!Node.Section {
-        const alt_text = try takeUntil(&reader.io_reader, ']');
-        reader.io_reader.toss(1);
-
+        const alt_text = try reader.takeBalanced('[', ']');
         if (try reader.io_reader.takeByte() != '(') return error.InvalidMarkdownFile;
-
-        const contents = try takeUntil(&reader.io_reader, ')');
+        const contents = try reader.takeBalanced('(', ')');
         const content = switch (options.mode) {
             .loose => std.mem.trim(u8, contents, " \t"),
             .strict => strict: {
@@ -1166,9 +1232,7 @@ const Context = struct {
             break :hover rest[1 .. rest.len - 1];
         } else &.{};
 
-        reader.toss(1);
-
-        return switch (as) {
+        const section: Node.Section = switch (as) {
             .image => .{
                 .image = .{
                     .alt_text = try parseLineText(arena, alt_text, options),
@@ -1185,6 +1249,9 @@ const Context = struct {
                 },
             },
         };
+        // Only commit the consumed bytes once nothing can fail anymore.
+        reader.start = reader.io_reader.seek;
+        return section;
     }
 
     const Reader = struct {
@@ -1213,12 +1280,7 @@ const Context = struct {
         }
 
         pub fn toss(self: *Reader, n: usize) void {
-            if (self.io_reader.seek + n > self.io_reader.end) {
-                self.io_reader.seek = self.io_reader.end;
-                self.start = self.io_reader.end;
-                return;
-            }
-
+            std.debug.assert(self.io_reader.seek + n <= self.io_reader.end);
             self.io_reader.toss(n);
             self.start = self.io_reader.seek;
         }
@@ -1246,6 +1308,25 @@ const Context = struct {
             return result;
         }
 
+        /// The bytes up to the `close` that balances an already consumed
+        /// `open`, consuming that `close`. Fails when it is missing.
+        pub fn takeBalanced(self: *Reader, open: u8, close: u8) error{EndOfStream}![]u8 {
+            const contents = self.io_reader.buffer[self.io_reader.seek..self.io_reader.end];
+            var depth: usize = 0;
+            for (contents, 0..) |byte, index| {
+                if (byte == open) {
+                    depth += 1;
+                } else if (byte == close) {
+                    if (depth == 0) {
+                        self.io_reader.toss(index + 1);
+                        return contents[0..index];
+                    }
+                    depth -= 1;
+                }
+            }
+            return error.EndOfStream;
+        }
+
         pub fn take(self: *Reader, end: usize) []u8 {
             const slice = self.io_reader.buffer[self.start..end];
             self.start = end;
@@ -1271,7 +1352,8 @@ const Context = struct {
                 if (next_byte != '[') continue :loop next_byte;
                 const seek_pos = reader.io_reader.seek;
 
-                const section = parseLinkSection(arena, &reader, .image, options) catch {
+                const section = parseLinkSection(arena, &reader, .image, options) catch |err| {
+                    if (err == error.OutOfMemory) return error.OutOfMemory;
                     reader.io_reader.seek = seek_pos;
                     const next_byte_inner = reader.io_reader.takeByte() catch {
                         try arr.append(arena, makeDefaultSection(&reader));
@@ -1290,7 +1372,8 @@ const Context = struct {
                 const section_start = reader.start;
                 const seek_pos = reader.io_reader.seek;
 
-                const section = parseLinkSection(arena, &reader, .link, options) catch {
+                const section = parseLinkSection(arena, &reader, .link, options) catch |err| {
+                    if (err == error.OutOfMemory) return error.OutOfMemory;
                     reader.io_reader.seek = seek_pos;
                     const next_byte_inner = reader.io_reader.takeByte() catch {
                         try arr.append(arena, makeDefaultSection(&reader));
@@ -1357,13 +1440,14 @@ const Context = struct {
             },
             ':' => {
                 const seek_pos = reader.io_reader.seek;
-                const text = reader.io_reader.takeDelimiterExclusive(':') catch {
+                const text: []const u8 = reader.takeExclusive(":") catch "";
+                if (text.len == 0) {
                     const next_byte_inner = reader.io_reader.takeByte() catch {
                         try arr.append(arena, makeDefaultSection(&reader));
                         break :loop;
                     };
                     continue :loop next_byte_inner;
-                };
+                }
 
                 if (reader.start != seek_pos - 1) {
                     try arr.append(arena, .{ .default = reader.take(seek_pos - 1) });
@@ -1392,7 +1476,7 @@ const Context = struct {
                         reader.io_reader.toss(1);
                         const seek_pos = reader.io_reader.seek;
 
-                        const text = reader.takeExclusive(&@as([2]u8, @splat(c))) catch {
+                        const text = reader.takeExclusive(&@as([3]u8, @splat(c))) catch {
                             const n_next_byte_inner = reader.io_reader.takeByte() catch {
                                 try arr.append(arena, makeDefaultSection(&reader));
                                 break :loop;
@@ -1409,7 +1493,13 @@ const Context = struct {
                         reader.toss(3);
                     } else {
                         const seek_pos = reader.io_reader.seek;
-                        const text = reader.takeExclusive(&@as([2]u8, @splat(c))) catch continue :loop next_byte_inner;
+                        var text = reader.takeExclusive(&@as([2]u8, @splat(c))) catch continue :loop next_byte_inner;
+                        // In a closing `***` the last two close this, the first an inner italic.
+                        const after_close = reader.io_reader.seek + 2;
+                        if (after_close < line.len and line[after_close] == c) {
+                            text = reader.io_reader.buffer[seek_pos .. reader.io_reader.seek + 1];
+                            reader.io_reader.seek += 1;
+                        }
 
                         if (reader.start != seek_pos - 2) {
                             try arr.append(arena, .{ .default = reader.take(seek_pos - 2) });
@@ -1428,7 +1518,7 @@ const Context = struct {
                 } else {
                     const seek_pos = reader.io_reader.seek;
 
-                    const text = reader.io_reader.takeDelimiterExclusive(c) catch {
+                    const text = reader.takeExclusive(&.{c}) catch {
                         continue :loop next_byte;
                     };
 
