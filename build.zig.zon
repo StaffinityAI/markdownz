@@ -2,21 +2,21 @@
     .name = .markdown,
     .version = "0.1.0",
     .fingerprint = 0x96be88e357d44907,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .dvui = .{
-            .url = "git+https://github.com/david-vanderson/dvui#5f3f394d78382c434d7c5b152ce476833db542de",
-            .hash = "dvui-0.5.0-dev-AQFJmVEc9gBhhgP3p8dN09veUHczWd-6-wo22tahQFdJ",
+            .url = "git+https://github.com/david-vanderson/dvui#23873e6c71a6bbcb23e22d7338e0302d1133d3af",
+            .hash = "dvui-0.6.0-dev-AQFJmU8kBAFU_boOfRXqWzNzYKlp0QNcDdL3JONR7Ro9",
             .lazy = true,
         },
         .vaxis = .{
-            .url = "git+https://github.com/rockorager/libvaxis#f37c42a3b324131c131d066767968e1f5b976453",
-            .hash = "vaxis-0.6.0-BWNV_AIQDADLTDo5jCn27pBWJBvi-sTrSkSKwITQWgUV",
+            .url = "git+https://github.com/rockorager/libvaxis#25b4bd7371cc3c32049e103ab292a525a1ecb7a7",
+            .hash = "vaxis-0.6.0-BWNV_G8gDgCNWI48cFKWal2NROjTRQXumw3ssMDeD6jt",
             .lazy = true,
         },
         .httpz = .{
-            .url = "git+https://github.com/karlseguin/http.zig#9b14af98fde5e98abb9a8376fe02b42003e835bf",
-            .hash = "httpz-0.0.0-PNVzrMgTCQDhzfBLRRebTx9LU056Ph2erdN9-42rFbhj",
+            .url = "git+https://github.com/karlseguin/http.zig#1bb71ff128a044b1645df91046473c38abbf965c",
+            .hash = "httpz-0.0.0-PNVzrFNMCQBySpfunggKlQQoD_FvF3yADlqg3xfbdX8p",
             .lazy = true,
         },
     },

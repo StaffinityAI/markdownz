@@ -469,8 +469,8 @@ test "oversized block markers and list numbers remain safe" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const hashes = "#" ** 300 ++ " heading\n";
-    const quotes = ">" ** 300 ++ " quoted\n";
+    const hashes = @as([300]u8, @splat('#')) ++ " heading\n";
+    const quotes = @as([300]u8, @splat('>')) ++ " quoted\n";
     const number = "999999999999999999999999999999999999. item\n";
     const nodes = try parse(arena.allocator(), hashes ++ quotes ++ number, .{});
     try expectDefaultText(nodes[0], hashes[0 .. hashes.len - 1]);

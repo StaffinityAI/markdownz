@@ -28,7 +28,7 @@ const CachedCodeBuffer = struct {
 pub const InitOptions = struct {
     parser: Parser.Options = .{},
     /// Used for Code Block rendering
-    tree_sitter: ?dvui.TextEntryWidget.InitOptions.TreeSitterOption = null,
+    tree_sitter: ?dvui.TreeSitter = null,
     unordered_list_indicators: []const []const u8 = &.{ "•", "◦", "▪", "▫" },
     header_font_increment: [6]f32 = [_]f32{ 15, 12, 10, 8, 6, 3 },
     /// Follow pattern `a., b., c.` instead of `1., 2., 3.`.
@@ -94,7 +94,7 @@ fn graphNeedsUpdate(cached: ?*const CachedGraph, source_hash: u64, source_len: u
 }
 
 fn parserOptionsHash(options: Parser.Options) u8 {
-    return @intFromEnum(options.mode) |
+    return @backingInt(options.mode) |
         (@as(u8, @intFromBool(options.parse_arbitrary_urls)) << 1) |
         (@as(u8, @intFromBool(options.underline_extension)) << 2) |
         (@as(u8, @intFromBool(options.typographic_replacement)) << 3);
@@ -334,31 +334,27 @@ pub const Renderer = struct {
         _ = gpa;
         if (columns.len == 0) return;
 
-        const col_widths = try dvui.currentWindow().arena().alloc(f32, columns.len);
-
         var grid = dvui.grid(
             @src(),
-            .colWidths(col_widths),
-            .{ .row_height_variable = true },
+            .{ .scroll_opts = .{ .horizontal = .auto } },
             .{
                 .expand = .horizontal,
                 .margin = .{ .y = 8, .h = 8 },
                 .border = .all(1),
-                .corner_radius = .all(4),
+                .corners = .all(4),
             },
         );
         defer grid.deinit();
+        // Rows wrap with the column width, so keep re-measuring their heights.
+        grid.autoSize(.rows);
 
-        const available_width = grid.data().contentRect().w - dvui.GridWidget.scrollbar_padding_defaults.w;
-        const column_width = @max(available_width / @as(f32, @floatFromInt(columns.len)), 140);
-        @memset(col_widths, column_width);
-
-        const border_color = dvui.themeGet().border;
-        const header_fill = dvui.themeGet().color(.control, .fill);
-        const alternate_fill = dvui.themeGet().color(.control, .fill_press);
+        const border_color: dvui.ColorOrGradient = .fromColor(dvui.themeGet().border);
+        const header_fill: dvui.ColorOrGradient = .fromColor(dvui.themeGet().color(.control, .fill));
+        const alternate_fill: dvui.ColorOrGradient = .fromColor(dvui.themeGet().color(.control, .fill_press));
 
         for (columns, 0..) |column, column_index| {
-            var cell = grid.headerCell(@src(), column_index, .{
+            var cell = grid.colHeader(.{ .col = column_index }, .{
+                .expand = .horizontal,
                 .background = true,
                 .color_fill = header_fill,
                 .color_border = border_color,
@@ -378,7 +374,8 @@ pub const Renderer = struct {
         const row_count = columns[0].values.len;
         for (0..row_count) |row_index| {
             for (columns, 0..) |column, column_index| {
-                var cell = grid.bodyCell(@src(), .colRow(column_index, row_index), .{
+                var cell = grid.cell(.{ .col = column_index, .row = row_index }, .{
+                    .expand = .horizontal,
                     .background = true,
                     .color_fill = if (row_index % 2 == 0) null else alternate_fill,
                     .color_border = border_color,
@@ -408,7 +405,7 @@ pub const Renderer = struct {
     }
 
     fn checkbox(src: std.builtin.SourceLocation, target: bool, opts: dvui.Options) void {
-        const options = dvui.checkbox_defaults.themeOverride(opts.theme).override(opts);
+        const options = dvui.checkbox_defaults.override(opts);
 
         var b = dvui.box(src, .{ .dir = .horizontal }, options);
         defer b.deinit();
@@ -421,7 +418,7 @@ pub const Renderer = struct {
         const rs = s.borderRectScale();
 
         if (b.data().visible()) {
-            dvui.checkmark(target, false, rs, false, false, options);
+            dvui.checkmark(target, false, rs, false, 0, options);
         }
     }
 
@@ -483,8 +480,8 @@ pub const Renderer = struct {
                 .highlight => |sec| {
                     iterateSections(tl, dvui_opts.override(.{
                         .background = true,
-                        .color_fill = options.highlight_color.background,
-                        .color_text = options.highlight_color.text,
+                        .color_fill = .{ .color = options.highlight_color.background },
+                        .color_text = .{ .color = options.highlight_color.text },
                     }), sec, url, options);
                 },
                 .code => |code| {
@@ -492,7 +489,7 @@ pub const Renderer = struct {
                         .background = true,
                         .border = .all(1),
                         .color_fill = .fromHex("#0e0e0e"),
-                        .corner_radius = .all(1),
+                        .corners = .all(1),
                     }).override(options.code_block);
                     if (url) |u| tl.addLink(.{ .url = u, .text = code }, opts) else tl.addText(code, opts);
                 },

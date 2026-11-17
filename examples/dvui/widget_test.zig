@@ -20,7 +20,7 @@ fn renderFrame() !dvui.App.Result {
 }
 
 fn renderHash() !u64 {
-    dvui.testing.widget_hasher = .init();
+    dvui.testing.widget_hasher = .init(0);
     defer dvui.testing.widget_hasher = null;
     _ = try dvui.testing.step(renderFrame);
     return dvui.testing.widget_hasher.?.final();

@@ -140,7 +140,7 @@ pub fn build(b: *std.Build) void {
             test_step.dependOn(&b.addRunArtifact(viewer_tests).step);
 
             const run_viewer = b.addRunArtifact(viewer);
-            if (b.args) |args| run_viewer.addArgs(args);
+            run_viewer.addPassthruArgs();
             run_viewer_step.dependOn(&run_viewer.step);
         }
     }
@@ -173,7 +173,7 @@ pub fn build(b: *std.Build) void {
             test_step.dependOn(&b.addRunArtifact(vaxis_tests).step);
 
             const run_vaxis_viewer = b.addRunArtifact(vaxis_viewer);
-            if (b.args) |args| run_vaxis_viewer.addArgs(args);
+            run_vaxis_viewer.addPassthruArgs();
             run_vaxis_viewer_step.dependOn(&run_vaxis_viewer.step);
         }
     }
