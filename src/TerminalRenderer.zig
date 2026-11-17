@@ -110,7 +110,10 @@ const Builder = struct {
                 try self.addBlock(&spans, .{ .prefix = bars, .continuation = bars });
             },
             .line_break => try self.addTextBlock(quote_depth, "", .{}),
-            .horizontal_rule => try self.blocks.append(self.allocator, .{ .gap_before = 1, .kind = .rule }),
+            .horizontal_rule => {
+                const bars = try self.quoteBars(quote_depth, "");
+                try self.blocks.append(self.allocator, .{ .prefix = bars, .continuation = bars, .gap_before = 1, .kind = .rule });
+            },
             .code_block => |block| {
                 const label = if (block.language.len == 0) "code" else block.language;
                 const header_bars = try self.quoteBars(quote_depth, "");
@@ -130,7 +133,7 @@ const Builder = struct {
             },
             .list => |list| try self.renderList(list.items, 0, quote_depth),
             .block_quote => |nodes_in_quote| try self.render(nodes_in_quote.items, quote_depth + 1),
-            .table => |columns| try self.renderTable(columns),
+            .table => |columns| try self.renderTable(columns, quote_depth),
             .footnote => |sections| {
                 var spans: std.ArrayList(Span) = .empty;
                 try self.appendSections(&spans, sections, .{ .dim = true }, null);
@@ -168,7 +171,7 @@ const Builder = struct {
         }
     }
 
-    fn renderTable(self: *Builder, columns: []const markdown.Node.Column) !void {
+    fn renderTable(self: *Builder, columns: []const markdown.Node.Column, quote_depth: usize) !void {
         if (columns.len == 0) return;
 
         const rendered_columns = try self.allocator.alloc(Table.Column, columns.len);
@@ -187,7 +190,10 @@ const Builder = struct {
             row_count = @max(row_count, values.len);
         }
 
+        const bars = try self.quoteBars(quote_depth, "");
         try self.blocks.append(self.allocator, .{
+            .prefix = bars,
+            .continuation = bars,
             .gap_before = 1,
             .kind = .{ .table = .{ .columns = rendered_columns, .row_count = row_count } },
         });
@@ -447,7 +453,8 @@ const too_wide_marker = "…";
 ///   later resume there.
 /// Returns the number of rows used, at least one.
 pub fn wrap(spans: []const Span, width: u16, measure: Measure, start: WrapCursor, visitor: anytype) usize {
-    if (spans.len == 0) return 1;
+    // Nothing fits in zero columns, so the text takes one empty row.
+    if (spans.len == 0 or width == 0) return 1;
     var row = start.row;
     var col = start.col;
     var soft_wrapped = start.soft_wrapped;
@@ -488,8 +495,10 @@ pub fn wrap(spans: []const Span, width: u16, measure: Measure, start: WrapCursor
                         .in_word = in_word,
                         .pending_wrap = pending_wrap,
                     });
-                    if (!in_word) {
-                        const word_width = measure.textWidth(word);
+                    // A word moves to the next row only from mid-row, and only
+                    // if it then fits on one row.
+                    if (!in_word and col > 0) {
+                        const word_width = wordWidth(spans, span_index, word, measure, width);
                         if (word_width + col > width and word_width <= width) {
                             row += 1;
                             col = 0;
@@ -548,6 +557,28 @@ pub fn wrap(spans: []const Span, width: u16, measure: Measure, start: WrapCursor
         }
     }
     return @max(row + @intFromBool(col > 0), 1);
+}
+
+/// Returns the width of `word`, which starts in `spans[span_index]`, including
+/// its continuation into the following spans. Stops measuring once the word
+/// is wider than `limit` and returns `limit + 1`.
+fn wordWidth(spans: []const Span, span_index: usize, word: []const u8, measure: Measure, limit: usize) usize {
+    var total: usize = 0;
+    var part = word;
+    var index = span_index;
+    while (true) {
+        var graphemes = uucode.grapheme.utf8Iterator(part);
+        while (graphemes.nextGrapheme()) |grapheme| {
+            total += measure.width(part[grapheme.start..grapheme.end]);
+            if (total > limit) return limit + 1;
+        }
+        const text = spans[index].text;
+        if (@intFromPtr(part.ptr) + part.len != @intFromPtr(text.ptr) + text.len) return total;
+        index += 1;
+        if (index == spans.len) return total;
+        const next = spans[index].text;
+        part = next[0 .. std.mem.indexOfAny(u8, next, " \t\r\n") orelse next.len];
+    }
 }
 
 /// Returns the rows `spans` take when wrapped to `width` columns.
@@ -683,13 +714,13 @@ pub const BlockLayout = struct {
 
 /// Measures `block` for painting. Free the result with `BlockLayout.deinit`.
 pub fn layoutBlock(allocator: std.mem.Allocator, block: Block, options: LayoutOptions) !BlockLayout {
+    const text_width = options.width -| prefixWidth(block, options.measure);
     switch (block.kind) {
         .rule => return .{ .width = options.width, .height = 1 },
-        .table => |table| return layoutTable(allocator, table, options),
+        .table => |table| return layoutTable(allocator, table, options.width, text_width, options.measure),
         .image => if (options.image_height) |height| return .{ .width = options.width, .height = height },
         .normal, .code, .heading => {},
     }
-    const text_width = options.width -| prefixWidth(block, options.measure);
     const text_height, const checkpoints = try measureCheckpoints(allocator, block.spans, text_width, options.measure);
     return .{
         .width = options.width,
@@ -698,10 +729,11 @@ pub fn layoutBlock(allocator: std.mem.Allocator, block: Block, options: LayoutOp
     };
 }
 
-fn layoutTable(allocator: std.mem.Allocator, table: Table, options: LayoutOptions) !BlockLayout {
-    if (table.columns.len == 0) return .{ .width = options.width, .height = 0 };
-    if (!tableFits(table, options.width)) return .{ .width = options.width, .height = 1 };
-    const widths = tableColumnWidths(options.width, table.columns.len);
+/// Measures `table` drawn `width` columns wide, in a block `layout_width` wide.
+fn layoutTable(allocator: std.mem.Allocator, table: Table, layout_width: u16, width: u16, measure: Measure) !BlockLayout {
+    if (table.columns.len == 0) return .{ .width = layout_width, .height = 0 };
+    if (!tableFits(table, width)) return .{ .width = layout_width, .height = 1 };
+    const widths = tableColumnWidths(width, table.columns.len);
 
     const rows = try allocator.alloc(usize, table.row_count + 2);
     errdefer allocator.free(rows);
@@ -715,20 +747,11 @@ fn layoutTable(allocator: std.mem.Allocator, table: Table, options: LayoutOption
     var row: usize = 1;
     for (rows[0 .. table.row_count + 1], 0..) |*start, index| {
         start.* = row;
-        var height: usize = 1;
-        for (table.columns, cells[index * table.columns.len ..][0..table.columns.len], 0..) |column, *checkpoints, column_index| {
-            const cell_height, checkpoints.* = try measureCheckpoints(
-                allocator,
-                tableCell(column, if (index == 0) null else index - 1),
-                widths.width(column_index) -| 2,
-                options.measure,
-            );
-            height = @max(height, cell_height);
-        }
-        row += height + 1;
+        const row_cells = cells[index * table.columns.len ..][0..table.columns.len];
+        row += try tableRowHeight(table, widths, if (index == 0) null else index - 1, measure, allocator, row_cells) + 1;
     }
     rows[table.row_count + 1] = row;
-    return .{ .width = options.width, .height = row, .table_rows = rows, .table_cells = cells };
+    return .{ .width = layout_width, .height = row, .table_rows = rows, .table_cells = cells };
 }
 
 /// Returns the columns left of the text of `block`.
@@ -842,7 +865,6 @@ pub const Layout = struct {
 };
 
 const TableWidths = struct {
-    total: u16,
     columns: usize,
     base: u16,
     remainder: u16,
@@ -859,7 +881,6 @@ const TableWidths = struct {
 fn tableColumnWidths(total_width: u16, columns: usize) TableWidths {
     const inner_width = total_width -| @as(u16, @intCast(columns + 1));
     return .{
-        .total = total_width,
         .columns = columns,
         .base = @max(inner_width / @as(u16, @intCast(columns)), 3),
         .remainder = inner_width % @as(u16, @intCast(columns)),
@@ -870,10 +891,25 @@ fn tableFits(table: Table, width: u16) bool {
     return table.columns.len > 0 and width >= table.columns.len * 4 + 1;
 }
 
-fn tableRowHeight(table: Table, widths: TableWidths, row: ?usize, measure: Measure) usize {
+/// Returns the height of a table row, the header for a null `row`. With an
+/// allocator, also stores the checkpoints of each cell in `checkpoints`.
+fn tableRowHeight(
+    table: Table,
+    widths: TableWidths,
+    row: ?usize,
+    measure: Measure,
+    allocator: ?std.mem.Allocator,
+    checkpoints: [][]const WrapCursor,
+) error{OutOfMemory}!usize {
     var height: usize = 1;
     for (table.columns, 0..) |column, index| {
-        height = @max(height, measureHeight(tableCell(column, row), widths.width(index) -| 2, measure));
+        const spans = tableCell(column, row);
+        const cell_width = widths.width(index) -| 2;
+        const cell_height = if (allocator) |gpa| blk: {
+            const cell_height, checkpoints[index] = try measureCheckpoints(gpa, spans, cell_width, measure);
+            break :blk cell_height;
+        } else measureHeight(spans, cell_width, measure);
+        height = @max(height, cell_height);
     }
     return height;
 }
@@ -939,17 +975,19 @@ pub const Region = struct {
 };
 
 /// Paints the rows of `block` from `skipped_rows` on into `region`.
-/// `block_layout` comes from `layoutBlock` or `Layout` for `region.width`.
+/// `block_layout` must come from `layoutBlock` or `Layout` for `region.width`.
+/// A hand-built layout without checkpoints or table rows also works, but then
+/// painting measures everything above the visible rows again.
 pub fn paintBlock(region: Region, block: Block, block_layout: BlockLayout, skipped_rows: usize, measure: Measure) void {
-    const fits = block_layout.width == region.width;
-    const checkpoints = if (fits) block_layout.checkpoints else &.{};
+    std.debug.assert(block_layout.width == region.width);
+    const checkpoints = block_layout.checkpoints;
     switch (block.kind) {
-        .rule => if (skipped_rows == 0) paintRule(region),
+        .rule => if (skipped_rows == 0) paintRule(paintPrefix(region, block, skipped_rows, measure)),
         .table => |table| paintTable(
-            region,
+            paintPrefix(region, block, skipped_rows, measure),
             table,
-            if (fits) block_layout.table_rows else &.{},
-            if (fits) block_layout.table_cells else &.{},
+            block_layout.table_rows,
+            block_layout.table_cells,
             skipped_rows,
             measure,
         ),
@@ -1071,7 +1109,10 @@ fn paintTable(region: Region, table: Table, rows: []const usize, cells: []const 
     while (index <= table.row_count) : (index += 1) {
         if (block_row >= skipped_rows + region.height) break;
         const row_index: ?usize = if (index == 0) null else index - 1;
-        const height = if (measured) rows[index + 1] - rows[index] - 1 else tableRowHeight(table, widths, row_index, measure);
+        const height = if (measured)
+            rows[index + 1] - rows[index] - 1
+        else
+            tableRowHeight(table, widths, row_index, measure, null, &.{}) catch unreachable;
         const row_cells = if (measured) cells[index * table.columns.len ..][0..table.columns.len] else &.{};
         paintVisibleTableRow(region, block_row, skipped_rows, table, widths, row_index, row_cells, height, measure);
         block_row += height;
@@ -1236,7 +1277,7 @@ pub const Grid = struct {
         if (col >= self.width or row_index >= self.height) return;
         const index = @as(usize, row_index) * self.width + col;
         self.cells[index] = cell;
-        for (1..cell.width) |offset| {
+        for (1..@max(cell.width, 1)) |offset| {
             if (col + offset >= self.width) break;
             self.cells[index + offset] = .{ .grapheme = "", .width = 0, .style = cell.style, .link = cell.link };
         }
@@ -1335,25 +1376,30 @@ fn writeLink(writer: *std.Io.Writer, uri: ?[]const u8) !void {
 /// end the escape sequence it is written into.
 fn writeUrl(writer: *std.Io.Writer, url: []const u8) !void {
     var index: usize = 0;
-    while (index < url.len) : (index += 1) {
-        const byte = url[index];
-        if (byte < 0x20 or byte == 0x7f) {
-            try writer.print("%{X:0>2}", .{byte});
-        } else if (byte == 0xc2 and index + 1 < url.len and url[index + 1] >= 0x80 and url[index + 1] < 0xa0) {
-            try writer.print("%{X:0>2}%{X:0>2}", .{ byte, url[index + 1] });
+    while (index < url.len) {
+        const len = controlLength(url, index);
+        if (len == 0) {
+            try writer.writeByte(url[index]);
             index += 1;
-        } else {
-            try writer.writeByte(byte);
+            continue;
         }
+        for (url[index..][0..len]) |byte| try writer.print("%{X:0>2}", .{byte});
+        index += len;
     }
 }
 
 fn isSafeUrl(url: []const u8) bool {
-    for (url, 0..) |byte, index| {
-        if (byte < 0x20 or byte == 0x7f) return false;
-        if (byte == 0xc2 and index + 1 < url.len and url[index + 1] >= 0x80 and url[index + 1] < 0xa0) return false;
-    }
+    for (0..url.len) |index| if (controlLength(url, index) != 0) return false;
     return true;
+}
+
+/// Returns the length in bytes of the C0 or C1 control character at
+/// `url[index]`, or 0 if there is none.
+fn controlLength(url: []const u8, index: usize) usize {
+    const byte = url[index];
+    if (byte < 0x20 or byte == 0x7f) return 1;
+    if (byte == 0xc2 and index + 1 < url.len and url[index + 1] >= 0x80 and url[index + 1] < 0xa0) return 2;
+    return 0;
 }
 
 fn writeStyle(writer: *std.Io.Writer, style: Style) !void {
@@ -1682,4 +1728,57 @@ test "wrapped rows keep quote bars and list indents" {
         \\    ddd
         \\
     );
+}
+
+test "a zero column text area takes one row" {
+    try std.testing.expectEqual(@as(usize, 1), measureHeight(&.{.{ .text = "many words in a row" }}, 0, .unicode));
+    const prefix = [_]Span{.{ .text = "│ │ │   " }};
+    const block: Block = .{ .spans = &.{.{ .text = "many words that would each take a row" }}, .prefix = &prefix, .continuation = &prefix };
+    const block_layout = try layoutBlock(std.testing.allocator, block, .{ .width = 8 });
+    defer block_layout.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), block_layout.height);
+}
+
+test "grid ignores zero width cells" {
+    var grid = try testGrid(2, 1);
+    defer grid.deinit(std.testing.allocator);
+    grid.region().writeCell(0, 0, .{ .grapheme = "", .width = 0 });
+    try std.testing.expectEqual(@as(u8, 0), grid.row(0)[0].width);
+}
+
+test "words continuing into another span wrap as a whole" {
+    try expectRender("hello wor**ld**", .{ .width = 10, .color = false },
+        \\hello
+        \\world
+        \\
+    );
+    try std.testing.expectEqual(@as(usize, 2), measureHeight(&.{ .{ .text = "see wor" }, .{ .text = "" }, .{ .text = "ds." } }, 8, .unicode));
+}
+
+test "tables and rules keep their quote prefix" {
+    const bars = [_]Span{.{ .text = "│ " }};
+    const values = [_][]const Span{&.{.{ .text = "x" }}};
+    const columns = [_]Table.Column{.{ .alignment = .left, .header = &.{.{ .text = "A" }}, .values = &values }};
+    const blocks = [_]Block{
+        .{ .prefix = &bars, .continuation = &bars, .kind = .{ .table = .{ .columns = &columns, .row_count = 1 } } },
+        .{ .prefix = &bars, .continuation = &bars, .gap_before = 1, .kind = .rule },
+    };
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try renderDocument(std.testing.allocator, &output.writer, .{ .blocks = &blocks }, .{ .width = 9, .color = false });
+    try std.testing.expectEqualStrings(
+        \\│ ┌─────┐
+        \\│ │ A   │
+        \\│ ├─────┤
+        \\│ │ x   │
+        \\│ └─────┘
+        \\
+        \\│ ───────
+        \\
+    , output.written());
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const document = try build(arena.allocator(), try markdown.parse(arena.allocator(), "> ---", .{}));
+    try std.testing.expectEqualStrings("│ ", document.blocks[0].prefix[0].text);
 }
