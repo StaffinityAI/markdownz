@@ -872,11 +872,12 @@ pub const Options = struct {
     typographic_replacement: bool = false,
 };
 
-pub fn parse(arena: std.mem.Allocator, buffer: []const u8, options: Options) ![]*Node {
+pub fn parse(arena: std.mem.Allocator, buffer: []const u8, options: Options) error{OutOfMemory}![]*Node {
     var ctx: Context = .{};
     var reader: std.Io.Reader = .fixed(if (std.mem.startsWith(u8, buffer, "\xEF\xBB\xBF")) buffer[3..] else buffer);
 
-    while (try reader.takeDelimiter('\n')) |line| {
+    // A fixed reader holds every line in its buffer and never reads more.
+    while (reader.takeDelimiter('\n') catch unreachable) |line| {
         try ctx.parseLine(arena, line, options);
     }
 

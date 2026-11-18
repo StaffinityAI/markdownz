@@ -101,6 +101,17 @@ try term.render(allocator, writer, nodes, .{
 
 Styled output uses SGR escape sequences and OSC 8 hyperlinks. `term.renderAlloc` returns the output in an allocated buffer.
 
+`term.renderText` parses and renders in one call, with parser options in `.parse`:
+
+```zig
+try term.renderText(allocator, writer, source, .{
+    .width = 80,
+    .parse = .{ .underline_extension = true },
+});
+```
+
+`markdown-term` re-exports the parser as `term.markdown`, so it is the only module a terminal app needs to import.
+
 TUIs can use the steps behind `render` directly:
 
 - `term.build(arena, nodes)` returns a `Document` of styled blocks.

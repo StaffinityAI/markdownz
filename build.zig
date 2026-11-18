@@ -133,7 +133,6 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{
-                    .{ .name = "markdown", .module = markdown },
                     .{ .name = "markdown-term", .module = markdown_term.? },
                     .{ .name = "default_document", .module = default_document },
                 },
@@ -232,7 +231,6 @@ pub fn build(b: *std.Build) void {
                     .target = target,
                     .optimize = optimize,
                     .imports = &.{
-                        .{ .name = "markdown", .module = markdown },
                         .{ .name = "markdown-term", .module = markdown_term.? },
                         .{ .name = "default_document", .module = default_document },
                         .{ .name = "vaxis", .module = vaxis },

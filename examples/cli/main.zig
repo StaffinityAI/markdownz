@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const default_document = @import("default_document");
-const markdown = @import("markdown");
 const term = @import("markdown-term");
 
 const max_markdown_size = 64 * 1024 * 1024;
@@ -28,10 +27,6 @@ pub fn main(init: std.process.Init) !void {
         default_document.source;
     defer if (arguments.path != null) init.gpa.free(source);
 
-    var arena = std.heap.ArenaAllocator.init(init.gpa);
-    defer arena.deinit();
-    const nodes = try markdown.parse(arena.allocator(), source, .{ .underline_extension = true });
-
     const stdout = std.Io.File.stdout();
     const color = switch (arguments.color) {
         .always => true,
@@ -41,9 +36,10 @@ pub fn main(init: std.process.Init) !void {
 
     var buffer: [4096]u8 = undefined;
     var writer = stdout.writer(init.io, &buffer);
-    try term.render(init.gpa, &writer.interface, nodes, .{
+    try term.renderText(init.gpa, &writer.interface, source, .{
         .width = arguments.width orelse terminalWidth(stdout) orelse default_width,
         .color = color,
+        .parse = .{ .underline_extension = true },
     });
     try writer.interface.flush();
 }

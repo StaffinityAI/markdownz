@@ -2,10 +2,12 @@
 //!
 //! `build` turns nodes into styled blocks, `Layout` measures blocks for a
 //! terminal width and `paintBlock` draws them onto any cell `Surface`.
-//! `render` combines these steps and writes ANSI-styled text for CLIs.
+//! `render` combines these steps and writes ANSI-styled text for CLIs, and
+//! `renderText` parses markdown source first.
 
 const std = @import("std");
-const markdown = @import("markdown");
+/// The parser, so this module is enough to parse and render.
+pub const markdown = @import("markdown");
 const uucode = @import("uucode");
 
 pub const Color = union(enum) {
@@ -69,7 +71,7 @@ pub const Document = struct {
 
 /// Builds styled blocks from `nodes`. Allocations are not freed individually,
 /// so pass an arena. The result references the node text.
-pub fn build(arena: std.mem.Allocator, nodes: []const *markdown.Node) !Document {
+pub fn build(arena: std.mem.Allocator, nodes: []const *markdown.Node) error{OutOfMemory}!Document {
     var builder: Builder = .{ .allocator = arena };
     try builder.render(nodes, 0);
     return .{ .blocks = try builder.blocks.toOwnedSlice(arena) };
@@ -713,7 +715,7 @@ pub const BlockLayout = struct {
 };
 
 /// Measures `block` for painting. Free the result with `BlockLayout.deinit`.
-pub fn layoutBlock(allocator: std.mem.Allocator, block: Block, options: LayoutOptions) !BlockLayout {
+pub fn layoutBlock(allocator: std.mem.Allocator, block: Block, options: LayoutOptions) error{OutOfMemory}!BlockLayout {
     const text_width = options.width -| prefixWidth(block, options.measure);
     switch (block.kind) {
         .rule => return .{ .width = options.width, .height = 1 },
@@ -1289,28 +1291,42 @@ pub const Options = struct {
     measure: Measure = .unicode,
     /// Emit SGR styles and OSC 8 hyperlinks. Disable for plain text.
     color: bool = true,
+    /// How `renderText` parses its source.
+    parse: markdown.Options = .{},
 };
+
+pub const RenderError = error{OutOfMemory} || std.Io.Writer.Error;
 
 /// Bounds on the rows painted at once, so tall or wide blocks do not need a
 /// grid of their full size.
 const max_chunk_rows = 256;
 const max_chunk_cells = 16 * 1024;
 
+/// Parses `text` and writes it as terminal text, one line per row.
+pub fn renderText(allocator: std.mem.Allocator, writer: *std.Io.Writer, text: []const u8, options: Options) RenderError!void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const nodes = try markdown.parse(arena.allocator(), text, options.parse);
+    try renderDocument(allocator, writer, try build(arena.allocator(), nodes), options);
+}
+
 /// Writes `nodes` as terminal text, one line per row.
-pub fn render(allocator: std.mem.Allocator, writer: *std.Io.Writer, nodes: []const *markdown.Node, options: Options) !void {
+pub fn render(allocator: std.mem.Allocator, writer: *std.Io.Writer, nodes: []const *markdown.Node, options: Options) RenderError!void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     try renderDocument(allocator, writer, try build(arena.allocator(), nodes), options);
 }
 
-pub fn renderAlloc(allocator: std.mem.Allocator, nodes: []const *markdown.Node, options: Options) ![]u8 {
+pub fn renderAlloc(allocator: std.mem.Allocator, nodes: []const *markdown.Node, options: Options) error{OutOfMemory}![]u8 {
     var output: std.Io.Writer.Allocating = .init(allocator);
     errdefer output.deinit();
-    try render(allocator, &output.writer, nodes, options);
+    render(allocator, &output.writer, nodes, options) catch |err| switch (err) {
+        error.OutOfMemory, error.WriteFailed => return error.OutOfMemory,
+    };
     return output.toOwnedSlice();
 }
 
-pub fn renderDocument(allocator: std.mem.Allocator, writer: *std.Io.Writer, document: Document, options: Options) !void {
+pub fn renderDocument(allocator: std.mem.Allocator, writer: *std.Io.Writer, document: Document, options: Options) RenderError!void {
     const width = @max(options.width, 1);
     const chunk_rows: u16 = @intCast(std.math.clamp(max_chunk_cells / width, 1, max_chunk_rows));
     var grid = try Grid.init(allocator, width, chunk_rows);
@@ -1550,6 +1566,13 @@ test "plain rendering draws tables and rules" {
 
 test "styled rendering emits SGR and hyperlinks" {
     try expectRender("**bold** [site](https://example.com)", .{ .width = 40 }, "\x1b[0;1mbold\x1b[0m \x1b]8;;https://example.com\x1b\\\x1b[0;4;34msite\x1b]8;;\x1b\\\x1b[0m\n");
+}
+
+test "renderText parses with the parse options" {
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try renderText(std.testing.allocator, &output.writer, "__under__ *it*", .{ .parse = .{ .underline_extension = true } });
+    try std.testing.expectEqualStrings("\x1b[0;4munder\x1b[0m \x1b[0;3mit\x1b[0m\n", output.written());
 }
 
 test "link urls cannot inject escape sequences" {

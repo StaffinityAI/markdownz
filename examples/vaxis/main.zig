@@ -1,7 +1,7 @@
 const std = @import("std");
 const default_document = @import("default_document");
-const markdown = @import("markdown");
 const term = @import("markdown-term");
+const markdown = term.markdown;
 const vaxis = @import("vaxis");
 
 pub const panic = vaxis.Panic;
