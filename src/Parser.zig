@@ -119,6 +119,48 @@ test "unclosed links and images are text" {
     try expectTextContentSections(mixed[0].text[1..], " [c");
 }
 
+test "colons in prose are not emoji shortcodes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const linked = try parse(arena.allocator(), "Note: see [docs](https://example.com).", .{});
+    try std.testing.expectEqual(@as(usize, 0), countSectionTag(linked[0].text, .emoji_shortcode));
+    try std.testing.expectEqual(@as(usize, 1), countSectionTag(linked[0].text, .link));
+
+    for ([_][]const u8{ "a: b: c", "time 10:30:00", "x :a b: y", "a:smile:b", "x:+1:", "center :-: or :---:" }) |source| {
+        const nodes = try parse(arena.allocator(), source, .{});
+        try expectTextContent(nodes[0], source);
+    }
+
+    const mixed = try parse(arena.allocator(), "Note: :smile: and :+1:", .{});
+    try std.testing.expectEqual(@as(usize, 2), countSectionTag(mixed[0].text, .emoji_shortcode));
+}
+
+test "style delimiters need text on their inner side" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    for ([_][]const u8{ "2 * 3 * 4", "a ** b ** c", "my_var_name and other_var", "a == b == c", "a ~~ b ~~ c", "x_[a](b)" }) |source| {
+        const nodes = try parse(arena.allocator(), source, .{});
+        try std.testing.expectEqual(@as(usize, 0), countSectionTag(nodes[0].text, .italic));
+        try std.testing.expectEqual(@as(usize, 0), countSectionTag(nodes[0].text, .bold));
+        try std.testing.expectEqual(@as(usize, 0), countSectionTag(nodes[0].text, .highlight));
+        try std.testing.expectEqual(@as(usize, 0), countSectionTag(nodes[0].text, .strike_through));
+    }
+
+    const linked = try parse(arena.allocator(), "x_[a](b)", .{});
+    try std.testing.expectEqual(@as(usize, 1), countSectionTag(linked[0].text, .link));
+
+    // A closer preceded by a space is skipped for the next one.
+    const skipped = try parse(arena.allocator(), "*a * b* c", .{});
+    try std.testing.expectEqual(@as(usize, 1), countSectionTag(skipped[0].text, .italic));
+    try expectTextContentSections(skipped[0].text[0].italic, "a * b");
+
+    const words = try parse(arena.allocator(), "_foo_bar_ and a*b*c", .{});
+    try expectTextContentSections(words[0].text[0].italic, "foo_bar");
+    try std.testing.expectEqual(@as(usize, 2), countSectionTag(words[0].text, .italic));
+}
+
 test "unclosed emphasis and emoji shortcodes are text" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1203,6 +1245,52 @@ const Context = struct {
         try ctx.appendNode(arena, node);
     }
 
+    /// An emoji shortcode's name, like `smile` or `+1`: no spaces or
+    /// punctuation, so prose between two colons stays text.
+    fn isShortcodeName(text: []const u8) bool {
+        var has_alphanumeric = false;
+        for (text) |c| switch (c) {
+            'a'...'z', 'A'...'Z', '0'...'9' => has_alphanumeric = true,
+            '_', '+', '-' => {},
+            else => return false,
+        };
+        // So ":-:" and ":---:" stay text.
+        return has_alphanumeric;
+    }
+
+    fn delimiterRunLength(line: []const u8, start: usize) usize {
+        var end = start + 1;
+        while (end < line.len and line[end] == line[start]) : (end += 1) {}
+        return end - start;
+    }
+
+    /// Whether the `len` delimiter bytes at `start` can open a style: text
+    /// follows them, and `_` does not sit inside a word, so `2 * 3 * 4`,
+    /// `a == b` and `snake_case_name` stay text.
+    fn canOpenStyle(line: []const u8, start: usize, len: usize) bool {
+        const after = start + len;
+        if (after >= line.len or std.ascii.isWhitespace(line[after])) return false;
+        return line[start] != '_' or start == 0 or !std.ascii.isAlphanumeric(line[start - 1]);
+    }
+
+    /// Like `canOpenStyle`, mirrored: text precedes the delimiter, and `_`
+    /// is not followed by a word.
+    fn canCloseStyle(line: []const u8, start: usize, len: usize) bool {
+        if (start == 0 or std.ascii.isWhitespace(line[start - 1])) return false;
+        const after = start + len;
+        return line[start] != '_' or after >= line.len or !std.ascii.isAlphanumeric(line[after]);
+    }
+
+    /// The first `delimiter` at or after `from` that can close a style.
+    fn findClosingDelimiter(line: []const u8, from: usize, delimiter: []const u8) ?usize {
+        var index = from;
+        while (std.mem.findPos(u8, line, index, delimiter)) |found| {
+            if (canCloseStyle(line, found, delimiter.len)) return found;
+            index = found + 1;
+        }
+        return null;
+    }
+
     fn makeDefaultSection(reader: *Reader) Node.Section {
         return .{ .default = reader.io_reader.buffer[reader.start..reader.io_reader.seek] };
     }
@@ -1389,33 +1477,30 @@ const Context = struct {
                 continue :loop reader.io_reader.takeByte() catch break :loop;
             },
             '=', '~' => |c| {
-                const next_byte = reader.io_reader.takeByte() catch {
-                    try arr.append(arena, makeDefaultSection(&reader));
-                    break :loop;
-                };
-
-                if (next_byte != c) continue :loop next_byte;
-                const seek_pos = reader.io_reader.seek;
-
-                const text = reader.takeExclusive(&@as([2]u8, @splat(c))) catch {
-                    const next_byte_inner = reader.io_reader.takeByte() catch {
+                const opening_start = reader.io_reader.seek - 1;
+                const delimiter_len = delimiterRunLength(line, opening_start);
+                const content_start = opening_start + delimiter_len;
+                const closing = if (delimiter_len == 2 and canOpenStyle(line, opening_start, 2))
+                    findClosingDelimiter(line, content_start, line[opening_start..content_start])
+                else
+                    null;
+                const end = closing orelse {
+                    reader.io_reader.seek = content_start;
+                    continue :loop reader.io_reader.takeByte() catch {
                         try arr.append(arena, makeDefaultSection(&reader));
                         break :loop;
                     };
-                    continue :loop next_byte_inner;
                 };
 
-                if (reader.start != seek_pos - 2) {
-                    try arr.append(arena, .{ .default = reader.take(seek_pos - 2) });
+                if (reader.start != opening_start) {
+                    try arr.append(arena, .{ .default = line[reader.start..opening_start] });
                 }
 
-                if (c == '=') {
-                    try arr.append(arena, .{ .highlight = try parseLineText(arena, text, options) });
-                } else {
-                    try arr.append(arena, .{ .strike_through = try parseLineText(arena, text, options) });
-                }
+                const nested = try parseLineText(arena, line[content_start..end], options);
+                try arr.append(arena, if (c == '=') .{ .highlight = nested } else .{ .strike_through = nested });
 
-                reader.toss(2);
+                reader.io_reader.seek = end + 2;
+                reader.start = reader.io_reader.seek;
                 continue :loop reader.io_reader.takeByte() catch break :loop;
             },
             '`' => {
@@ -1441,7 +1526,15 @@ const Context = struct {
             ':' => {
                 const seek_pos = reader.io_reader.seek;
                 const text: []const u8 = reader.takeExclusive(":") catch "";
-                if (text.len == 0) {
+                const buffer = reader.io_reader.buffer[0..reader.io_reader.end];
+                // At word boundaries, so "10:30:00" stays text.
+                const after = reader.io_reader.seek + 1;
+                const bounded = (seek_pos < 2 or !std.ascii.isAlphanumeric(buffer[seek_pos - 2])) and
+                    (after >= buffer.len or !std.ascii.isAlphanumeric(buffer[after]));
+                if (!bounded or !isShortcodeName(text)) {
+                    // Prose with two colons on a line ("Note: see https://..."):
+                    // the first stays text and the scan resumes after it.
+                    reader.io_reader.seek = seek_pos;
                     const next_byte_inner = reader.io_reader.takeByte() catch {
                         try arr.append(arena, makeDefaultSection(&reader));
                         break :loop;
@@ -1459,77 +1552,36 @@ const Context = struct {
                 continue :loop reader.io_reader.takeByte() catch break :loop;
             },
             '*', '_' => |c| {
-                const next_byte = reader.io_reader.peekByte() catch {
-                    try arr.append(arena, makeDefaultSection(&reader));
-                    break :loop;
-                };
-
-                if (next_byte == c) {
-                    reader.io_reader.toss(1);
-
-                    const next_byte_inner = reader.io_reader.peekByte() catch {
+                const opening_start = reader.io_reader.seek - 1;
+                const delimiter_len = @min(delimiterRunLength(line, opening_start), 3);
+                const content_start = opening_start + delimiter_len;
+                const closing = if (canOpenStyle(line, opening_start, delimiter_len))
+                    findClosingDelimiter(line, content_start, line[opening_start..content_start])
+                else
+                    null;
+                var end = closing orelse {
+                    reader.io_reader.seek = content_start;
+                    continue :loop reader.io_reader.takeByte() catch {
                         try arr.append(arena, makeDefaultSection(&reader));
                         break :loop;
                     };
+                };
+                // In a closing `***` the last two close this, the first an inner italic.
+                if (delimiter_len == 2 and end + 2 < line.len and line[end + 2] == c) end += 1;
 
-                    if (next_byte_inner == c) {
-                        reader.io_reader.toss(1);
-                        const seek_pos = reader.io_reader.seek;
-
-                        const text = reader.takeExclusive(&@as([3]u8, @splat(c))) catch {
-                            const n_next_byte_inner = reader.io_reader.takeByte() catch {
-                                try arr.append(arena, makeDefaultSection(&reader));
-                                break :loop;
-                            };
-                            continue :loop n_next_byte_inner;
-                        };
-
-                        if (reader.start != seek_pos - 3) {
-                            try arr.append(arena, .{ .default = reader.take(seek_pos - 3) });
-                        }
-
-                        try arr.append(arena, .{ .bold_italic = try parseLineText(arena, text, options) });
-
-                        reader.toss(3);
-                    } else {
-                        const seek_pos = reader.io_reader.seek;
-                        var text = reader.takeExclusive(&@as([2]u8, @splat(c))) catch continue :loop next_byte_inner;
-                        // In a closing `***` the last two close this, the first an inner italic.
-                        const after_close = reader.io_reader.seek + 2;
-                        if (after_close < line.len and line[after_close] == c) {
-                            text = reader.io_reader.buffer[seek_pos .. reader.io_reader.seek + 1];
-                            reader.io_reader.seek += 1;
-                        }
-
-                        if (reader.start != seek_pos - 2) {
-                            try arr.append(arena, .{ .default = reader.take(seek_pos - 2) });
-                        }
-
-                        try arr.append(
-                            arena,
-                            if (options.underline_extension and c == '_') .{
-                                .underline = try parseLineText(arena, text, options),
-                            } else .{
-                                .bold = try parseLineText(arena, text, options),
-                            },
-                        );
-                        reader.toss(2);
-                    }
-                } else {
-                    const seek_pos = reader.io_reader.seek;
-
-                    const text = reader.takeExclusive(&.{c}) catch {
-                        continue :loop next_byte;
-                    };
-
-                    if (reader.start != seek_pos - 1) {
-                        try arr.append(arena, .{ .default = reader.take(seek_pos - 1) });
-                    }
-
-                    try arr.append(arena, .{ .italic = try parseLineText(arena, text, options) });
-                    reader.toss(1);
+                if (reader.start != opening_start) {
+                    try arr.append(arena, .{ .default = line[reader.start..opening_start] });
                 }
 
+                const nested = try parseLineText(arena, line[content_start..end], options);
+                try arr.append(arena, switch (delimiter_len) {
+                    1 => .{ .italic = nested },
+                    2 => if (options.underline_extension and c == '_') .{ .underline = nested } else .{ .bold = nested },
+                    else => .{ .bold_italic = nested },
+                });
+
+                reader.io_reader.seek = end + delimiter_len;
+                reader.start = reader.io_reader.seek;
                 continue :loop reader.io_reader.takeByte() catch break :loop;
             },
             else => {
