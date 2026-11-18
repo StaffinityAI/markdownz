@@ -2,7 +2,7 @@ const std = @import("std");
 const default_document = @import("default_document");
 const dvui = @import("dvui");
 const SDLBackend = @import("sdl-backend");
-const MarkdownWidget = @import("widget.zig");
+const MarkdownWidget = @import("lib").MarkdownWidget;
 
 const max_markdown_size = 64 * 1024 * 1024;
 const max_image_size = 64 * 1024 * 1024;

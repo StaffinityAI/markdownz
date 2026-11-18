@@ -817,7 +817,7 @@ pub const Layout = struct {
 
     /// Recomputes the layout unless the blocks and options are the ones it was
     /// last computed for.
-    pub fn update(self: *Layout, allocator: std.mem.Allocator, blocks: []const Block, options: LayoutOptions) !void {
+    pub fn update(self: *Layout, allocator: std.mem.Allocator, blocks: []const Block, options: LayoutOptions) error{OutOfMemory}!void {
         const key: Key = .{
             .blocks = blocks.ptr,
             .block_count = blocks.len,
@@ -1248,7 +1248,7 @@ pub const Grid = struct {
     height: u16,
     cells: []Cell,
 
-    pub fn init(allocator: std.mem.Allocator, width: u16, height: u16) !Grid {
+    pub fn init(allocator: std.mem.Allocator, width: u16, height: u16) error{OutOfMemory}!Grid {
         const cells = try allocator.alloc(Cell, @as(usize, width) * height);
         @memset(cells, .{});
         return .{ .width = width, .height = height, .cells = cells };

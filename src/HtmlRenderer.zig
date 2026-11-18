@@ -1,13 +1,26 @@
 const std = @import("std");
-const markdown = @import("markdown");
+/// The parser, so this module is enough to parse and render.
+pub const markdown = @import("markdown");
 
 pub const Options = struct {
     document: bool = true,
     title: []const u8 = "Markdown document",
     language: []const u8 = "en",
+    /// How `renderText` parses its source.
+    parse: markdown.Options = .{},
 };
 
-pub fn render(writer: *std.Io.Writer, nodes: []const *markdown.Node, options: Options) !void {
+pub const RenderError = error{OutOfMemory} || std.Io.Writer.Error;
+
+/// Parses `text` and writes it as HTML. `allocator` holds the parsed nodes
+/// until rendering ends.
+pub fn renderText(allocator: std.mem.Allocator, writer: *std.Io.Writer, text: []const u8, options: Options) RenderError!void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    try render(writer, try markdown.parse(arena.allocator(), text, options.parse), options);
+}
+
+pub fn render(writer: *std.Io.Writer, nodes: []const *markdown.Node, options: Options) std.Io.Writer.Error!void {
     if (options.document) {
         try writer.writeAll("<!DOCTYPE html>\n<html lang=\"");
         try writeEscaped(writer, options.language, .attribute);
@@ -21,10 +34,12 @@ pub fn render(writer: *std.Io.Writer, nodes: []const *markdown.Node, options: Op
     if (options.document) try writer.writeAll("</body>\n</html>\n");
 }
 
-pub fn renderAlloc(allocator: std.mem.Allocator, nodes: []const *markdown.Node, options: Options) ![]u8 {
+pub fn renderAlloc(allocator: std.mem.Allocator, nodes: []const *markdown.Node, options: Options) error{OutOfMemory}![]u8 {
     var output: std.Io.Writer.Allocating = .init(allocator);
     errdefer output.deinit();
-    try render(&output.writer, nodes, options);
+    render(&output.writer, nodes, options) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+    };
     return output.toOwnedSlice();
 }
 
@@ -254,6 +269,13 @@ fn writeEscaped(writer: *std.Io.Writer, value: []const u8, context: EscapeContex
         '\'' => if (context == .attribute) try writer.writeAll("&#39;") else try writer.writeByte(byte),
         else => try writer.writeByte(byte),
     };
+}
+
+test "renderText parses with the parse options" {
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try renderText(std.testing.allocator, &output.writer, "__under__", .{ .document = false, .parse = .{ .underline_extension = true } });
+    try std.testing.expectEqualStrings("<p><u>under</u></p>\n", output.written());
 }
 
 test "full document metadata and text escaping" {

@@ -155,6 +155,20 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .backend = .testing,
         })) |dvui_test_dep| {
+            const lib_test_module = b.createModule(.{
+                .root_source_file = b.path("src/root.zig"),
+                .target = b.graph.host,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "dvui", .module = dvui_test_dep.module("dvui_testing") },
+                    .{ .name = "markdown", .module = markdown },
+                },
+            });
+            const lib_tests = b.addTest(.{
+                .name = "markdown-dvui-lib-tests",
+                .root_module = lib_test_module,
+            });
+            test_step.dependOn(&b.addRunArtifact(lib_tests).step);
             const widget_tests = b.addTest(.{
                 .name = "markdown-dvui-widget-tests",
                 .root_module = b.createModule(.{
@@ -164,6 +178,7 @@ pub fn build(b: *std.Build) void {
                     .imports = &.{
                         .{ .name = "markdown", .module = markdown },
                         .{ .name = "dvui", .module = dvui_test_dep.module("dvui_testing") },
+                        .{ .name = "lib", .module = lib_test_module },
                     },
                 }),
             });
@@ -177,7 +192,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .backend = .sdl3,
         })) |dvui_dep| {
-            _ = b.addModule("lib", .{
+            const lib = b.addModule("lib", .{
                 .root_source_file = b.path("src/root.zig"),
                 .target = target,
                 .optimize = optimize,
@@ -194,9 +209,9 @@ pub fn build(b: *std.Build) void {
                     .target = target,
                     .optimize = optimize,
                     .imports = &.{
-                        .{ .name = "markdown", .module = markdown },
                         .{ .name = "default_document", .module = default_document },
                         .{ .name = "dvui", .module = dvui_dep.module("dvui_sdl3") },
+                        .{ .name = "lib", .module = lib },
                         .{ .name = "sdl-backend", .module = dvui_dep.module("sdl3") },
                     },
                 }),
@@ -264,7 +279,6 @@ pub fn build(b: *std.Build) void {
                     .target = target,
                     .optimize = optimize,
                     .imports = &.{
-                        .{ .name = "markdown", .module = markdown },
                         .{ .name = "markdown-html", .module = markdown_html },
                         .{ .name = "default_document", .module = default_document },
                         .{ .name = "httpz", .module = httpz_dep.module("httpz") },

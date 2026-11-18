@@ -1,2 +1,6 @@
-pub const Parser = @import("Parser.zig");
-pub const MarkdownWidget = @import("../examples/dvui/widget.zig");
+pub const Parser = @import("markdown");
+pub const MarkdownWidget = @import("MarkdownWidget.zig");
+
+test {
+    _ = MarkdownWidget;
+}

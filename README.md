@@ -86,6 +86,8 @@ defer allocator.free(document);
 
 Use `html.render(writer, nodes, options)` to stream directly to an `std.Io.Writer`. Set `.document = false` for an HTML fragment. Content and attributes are HTML-escaped.
 
+`html.renderText(allocator, writer, source, options)` parses and renders in one call, with parser options in `.parse`. `markdown-html` re-exports the parser as `html.markdown`, so it is the only module an HTML app needs to import.
+
 ## Terminal Rendering
 
 Write a document as terminal text, word-wrapped to a width:
@@ -111,6 +113,8 @@ try term.renderText(allocator, writer, source, .{
 ```
 
 `markdown-term` re-exports the parser as `term.markdown`, so it is the only module a terminal app needs to import.
+
+Parsing fails only with `error.OutOfMemory`; malformed markdown is kept as text. `term.render`, `term.renderText` and `html.renderText` return `RenderError`, which is `error{OutOfMemory} || std.Io.Writer.Error`. `html.render` does not allocate and returns only `std.Io.Writer.Error`. `renderAlloc` fails only with `error.OutOfMemory`.
 
 TUIs can use the steps behind `render` directly:
 

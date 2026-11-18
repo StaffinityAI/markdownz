@@ -848,30 +848,13 @@ pub const Options = struct {
         /// No padding strictly enforced in places like image urls
         strict,
     } = .loose,
-    /// **NOT YET IMPLEMENTED**
-    parse_arbitrary_urls: bool = false,
     /// Parse `__text__` as an `underline` node
     underline_extension: bool = false,
-    /// **NOT YET IMPLEMENTED**
-    /// Allows typographic replacement:
-    /// (c), (C) => ©
-    /// (tm), (TM) => ™
-    /// (p), (P) => ℗
-    /// ?? => ⁇
-    /// ???(?) => ？？？
-    /// !! => ‼
-    /// !!!(!) => ！！！
-    /// -- => –
-    /// --- => —
-    /// +- => ±
-    /// "..." = > “...”
-    /// '...' => ‘...’
-    /// !..(.) => !..
-    /// ?..(.) => ?..
-    /// ..(.) => …
-    typographic_replacement: bool = false,
 };
 
+/// Parses `buffer` into a list of nodes. Malformed markdown is kept as text,
+/// so only allocation fails. Allocations are not freed individually, so pass
+/// an arena. The result references `buffer`.
 pub fn parse(arena: std.mem.Allocator, buffer: []const u8, options: Options) error{OutOfMemory}![]*Node {
     var ctx: Context = .{};
     var reader: std.Io.Reader = .fixed(if (std.mem.startsWith(u8, buffer, "\xEF\xBB\xBF")) buffer[3..] else buffer);

@@ -95,9 +95,7 @@ fn graphNeedsUpdate(cached: ?*const CachedGraph, source_hash: u64, source_len: u
 
 fn parserOptionsHash(options: Parser.Options) u8 {
     return @backingInt(options.mode) |
-        (@as(u8, @intFromBool(options.parse_arbitrary_urls)) << 1) |
-        (@as(u8, @intFromBool(options.underline_extension)) << 2) |
-        (@as(u8, @intFromBool(options.typographic_replacement)) << 3);
+        (@as(u8, @intFromBool(options.underline_extension)) << 1);
 }
 
 test "parser options participate in graph cache identity" {

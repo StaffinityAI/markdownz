@@ -1,6 +1,6 @@
 const std = @import("std");
 const dvui = @import("dvui");
-const MarkdownWidget = @import("widget.zig");
+const MarkdownWidget = @import("lib").MarkdownWidget;
 
 var test_arena: ?*std.heap.ArenaAllocator = null;
 var test_source: []const u8 = "";
